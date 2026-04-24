@@ -1,0 +1,18 @@
+# .NET build outputs
+bin/
+obj/
+
+# Environment variables (contains secrets)
+.env
+
+# User-specific files
+*.user
+*.suo
+.vs/
+
+# Docker
+.dockerignore
+
+# Runtime state
+*.json
+!app/app.csproj
