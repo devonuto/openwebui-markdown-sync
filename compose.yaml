@@ -1,0 +1,14 @@
+services:
+  openwebui-markdown-sync:
+    build: 
+      context: ./app
+      dockerfile: Dockerfile
+    image: openwebui-markdown-sync:latest
+    container_name: openwebui-markdown-sync
+    network_mode: "host"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+      - ./markdown-repos:/markdown-repos
+    restart: "no"
