@@ -256,7 +256,6 @@ public class MultiRepoKnowledgeSync
             {
                 filesToUpload.Add(file);
                 lock (updatedState) { updatedState[file] = hash; }
-                Console.WriteLine($"  [Pending Sync] {Path.GetRelativePath(directoryPath, file)}");
             }
         });
 
