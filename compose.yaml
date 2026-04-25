@@ -10,5 +10,6 @@ services:
       - .env
     volumes:
       - ./data:/data
+      - ./logs:/logs
       - ./markdown-repos:/markdown-repos
     restart: "no"

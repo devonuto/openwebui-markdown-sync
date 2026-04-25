@@ -16,6 +16,8 @@ obj/
 # Runtime state
 *.json
 !app/app.csproj
+data/
+logs/
 
 # markdown repos
 markdown-repos/

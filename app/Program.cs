@@ -5,6 +5,7 @@ using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -14,12 +15,22 @@ using System.Threading.Tasks;
 string webuiUrl = Environment.GetEnvironmentVariable("WEBUI_URL") ?? "http://localhost:3000";
 string apiKey = Environment.GetEnvironmentVariable("API_KEY");
 string stateFile = Environment.GetEnvironmentVariable("STATE_FILE") ?? "/data/sync_state.json";
-string rootReposPath = Environment.GetEnvironmentVariable("ROOT_REPOS_PATH") ?? "/volume2/homes/devonuto/markdown-repos";
+string rootReposPath = "/markdown-repos";
+string logsPath = "/logs";
+const int logRetentionDays = 14;
+string logFilePath = Path.Combine(logsPath, $"{DateTime.Now:yyyy-MM-dd}_Container.log");
+
+Directory.CreateDirectory(logsPath);
+
+using var logWriter = new FileStreamTextWriter(logFilePath, Console.Out);
+Console.SetOut(logWriter);
+Console.SetError(logWriter);
 
 Console.WriteLine("=== Starting Markdown Knowledge Sync ===");
 Console.WriteLine($"WebUI URL:       {webuiUrl}");
 Console.WriteLine($"State File:      {stateFile}");
 Console.WriteLine($"Root Repos Path: {rootReposPath}");
+Console.WriteLine($"Log File:        {logFilePath}");
 Console.WriteLine("========================================");
 
 if (string.IsNullOrEmpty(apiKey))
@@ -28,10 +39,18 @@ if (string.IsNullOrEmpty(apiKey))
     return;
 }
 
-var syncTool = new MultiRepoKnowledgeSync(webuiUrl, apiKey, stateFile);
-await syncTool.SyncAllRepositoriesAsync(rootReposPath);
-
-Console.WriteLine("\n=== Sync Process Complete ===");
+try
+{
+    var syncTool = new MultiRepoKnowledgeSync(webuiUrl, apiKey, stateFile);
+    await syncTool.SyncAllRepositoriesAsync(rootReposPath);
+    Console.WriteLine("\n=== Sync Process Complete ===");
+}
+finally
+{
+    RuntimeHelpers.CleanupOldLogFiles(logsPath, logRetentionDays, logFilePath);
+    Console.Out.Flush();
+    Console.Error.Flush();
+}
 
 // ==========================================
 // 2. SYNCHRONISATION LOGIC
@@ -324,8 +343,121 @@ public class MultiRepoKnowledgeSync
 
     private void SaveState(Dictionary<string, string> state)
     {
+        string? stateDirectory = Path.GetDirectoryName(_stateFilePath);
+        if (!string.IsNullOrEmpty(stateDirectory))
+        {
+            Directory.CreateDirectory(stateDirectory);
+        }
+
         var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(_stateFilePath, json);
         Console.WriteLine("State file updated successfully.");
+    }
+}
+
+public static class RuntimeHelpers
+{
+    public static void CleanupOldLogFiles(string logsPath, int retentionDays, string currentLogFilePath)
+    {
+        if (!Directory.Exists(logsPath))
+        {
+            return;
+        }
+
+        DateTime cutoffDate = DateTime.Today.AddDays(-(retentionDays - 1));
+        foreach (string filePath in Directory.GetFiles(logsPath, "*_Container.log"))
+        {
+            if (string.Equals(filePath, currentLogFilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string fileName = Path.GetFileName(filePath);
+            if (!DateTime.TryParseExact(
+                    fileName,
+                    "yyyy-MM-dd'_Container.log'",
+                    null,
+                    System.Globalization.DateTimeStyles.None,
+                    out DateTime logDate))
+            {
+                continue;
+            }
+
+            if (logDate.Date < cutoffDate)
+            {
+                File.Delete(filePath);
+                Console.WriteLine($"Deleted expired log file: {fileName}");
+            }
+        }
+    }
+}
+
+public sealed class FileStreamTextWriter : TextWriter
+{
+    private readonly TextWriter _consoleWriter;
+    private readonly StreamWriter _fileWriter;
+    private readonly object _lock = new();
+
+    public FileStreamTextWriter(string filePath, TextWriter consoleWriter)
+    {
+        _consoleWriter = consoleWriter;
+        _fileWriter = new StreamWriter(new FileStream(filePath, FileMode.Append, FileAccess.Write, FileShare.Read))
+        {
+            AutoFlush = true
+        };
+    }
+
+    public override Encoding Encoding => Encoding.UTF8;
+
+    public override void Write(char value)
+    {
+        lock (_lock)
+        {
+            _consoleWriter.Write(value);
+            _fileWriter.Write(value);
+        }
+    }
+
+    public override void Write(string? value)
+    {
+        lock (_lock)
+        {
+            _consoleWriter.Write(value);
+            _fileWriter.Write(value);
+        }
+    }
+
+    public override void WriteLine(string? value)
+    {
+        lock (_lock)
+        {
+            _consoleWriter.WriteLine(value);
+            _fileWriter.WriteLine(value);
+        }
+    }
+
+    public override void Flush()
+    {
+        lock (_lock)
+        {
+            _consoleWriter.Flush();
+            _fileWriter.Flush();
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (!disposing)
+        {
+            base.Dispose(disposing);
+            return;
+        }
+
+        lock (_lock)
+        {
+            _fileWriter.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 }

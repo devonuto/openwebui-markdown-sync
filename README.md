@@ -46,8 +46,25 @@ sudo git config --global --add safe.directory '*'
 | **Docker / Docker Compose** | Tested on Synology DSM with Container Manager |
 | **Open WebUI** | Must be running and reachable at `WEBUI_URL`; v0.3+ recommended |
 | **Open WebUI API key** | Generate one in Open WebUI → Settings → Account → API Keys |
-| **Cloned markdown repositories** | One or more directories of `.md` files under `ROOT_REPOS_PATH` |
+| **Cloned markdown repositories** | One or more Git repositories cloned under `./markdown-repos` |
 | **.NET 10 runtime** | Provided by the Docker image; no local install needed |
+
+## Folder setup
+
+Create the runtime folders before the first run:
+
+```bash
+mkdir -p data logs markdown-repos
+```
+
+Set ownership to the user that will clone repositories and run the scheduled tasks:
+
+```bash
+sudo chown -R <your-user>:<your-group> data logs markdown-repos
+chmod 775 data logs markdown-repos
+```
+
+If your scheduled task runs as `root`, make sure `root` still has read/write access to `data/` and `logs/`. Git access to `markdown-repos/` is controlled separately via the `safe.directory` setting shown above.
 
 ## Configuration
 
@@ -58,9 +75,16 @@ Copy `.env.example` (or create `.env`) and populate the following variables:
 | `WEBUI_URL` | Base URL of your Open WebUI instance | `http://localhost:3000` |
 | `API_KEY` | Bearer token for the Open WebUI API | *(required)* |
 | `STATE_FILE` | Path inside the container where sync state is persisted | `/data/sync_state.json` |
-| `ROOT_REPOS_PATH` | Host path (mounted into the container) containing the cloned repositories | *(required)* |
 
 > **Security note:** The `.env` file contains your API key and is excluded from version control via `.gitignore`. Never commit it.
+
+The repository source path is fixed in the container at `/markdown-repos`, which is bind-mounted from `./markdown-repos` on the host.
+
+## Logging
+
+Each run writes logs to `./logs/YYYY-MM-DD_Container.log` on the host via the `/logs` bind mount. Because the container is started with `--rm`, this host-mounted folder is what preserves logs between runs.
+
+Before the container exits, it removes log files older than 14 days and keeps the current day's log file.
 
 ## Running
 
@@ -72,6 +96,12 @@ Build the image once before scheduling:
 docker compose build
 ```
 
+If you are starting from a clean checkout, first copy the example compose file:
+
+```bash
+cp compose.yaml.example compose.yaml
+```
+
 ### On-demand sync
 
 Use `--rm` so the container is automatically removed after each run, keeping things clean:
@@ -79,6 +109,8 @@ Use `--rm` so the container is automatically removed after each run, keeping thi
 ```bash
 docker compose run --rm openwebui-markdown-sync
 ```
+
+This writes application logs to `./logs/` automatically. Additional shell redirection is optional and is only needed if you also want to capture scheduler-level output.
 
 ### Scheduled syncing on Synology
 
@@ -121,6 +153,8 @@ docker compose run --rm openwebui-markdown-sync
 
 > **Tip:** Give Task 2 a 30-minute offset from Task 1 to ensure the pulls have finished before the sync runs. For large repositories you may need a longer gap.
 
+The container will append to `./logs/YYYY-MM-DD_Container.log` for that day and remove logs older than 14 days automatically.
+
 ### Scheduled syncing on Linux
 
 Add two cron entries via `crontab -e`:
@@ -133,12 +167,7 @@ Add two cron entries via `crontab -e`:
 30 2 * * * cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync
 ```
 
-Redirect output to a log file if you want to keep a history:
-
-```cron
-0 2 * * * for repo in /path/to/openwebui-markdown-sync/markdown-repos/*/; do git -C "$repo" pull --ff-only >> /var/log/openwebui-markdown-sync.log 2>&1; done
-30 2 * * * cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync >> /var/log/openwebui-markdown-sync.log 2>&1
-```
+Application logs are already persisted to `./logs/YYYY-MM-DD_Container.log`, so cron redirection is optional.
 
 ## State persistence
 
@@ -155,6 +184,7 @@ app/
   Dockerfile          # Multi-stage build (SDK → runtime)
 markdown-repos/       # Cloned documentation repositories (not committed)
 data/                 # Created at runtime; holds sync_state.json
+logs/                 # Persistent container logs (not committed)
 .env                  # Local config (not committed)
 .env.example          # Template for .env
 ```
