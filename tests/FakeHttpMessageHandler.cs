@@ -14,6 +14,7 @@ public sealed class FakeHttpMessageHandler : HttpMessageHandler
     private readonly Func<HttpRequestMessage, HttpResponseMessage> _handler;
 
     public ConcurrentBag<(string Method, string Url)> RequestLog { get; } = new();
+    public ConcurrentBag<(string Method, string Url, string? Body)> RequestDetails { get; } = new();
 
     public FakeHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handler)
     {
@@ -25,6 +26,10 @@ public sealed class FakeHttpMessageHandler : HttpMessageHandler
         CancellationToken cancellationToken)
     {
         RequestLog.Add((request.Method.Method, request.RequestUri!.ToString()));
+        string? body = request.Content is null
+            ? null
+            : request.Content.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult();
+        RequestDetails.Add((request.Method.Method, request.RequestUri!.ToString(), body));
         return Task.FromResult(_handler(request));
     }
 }

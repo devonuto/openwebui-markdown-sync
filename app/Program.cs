@@ -296,24 +296,29 @@ public class MultiRepoKnowledgeSync
 
             if (batchUploaded.Count > 0)
             {
-                var fileIds = batchUploaded.Select(x => x.FileId).ToList();
-                bool attachSuccess = await AttachToKnowledgeBaseAsync(fileIds, kbId);
-                if (attachSuccess)
+                int attachedInBatch = 0;
+                foreach (var (FilePath, FileId) in batchUploaded)
                 {
-                    foreach (var (FilePath, FileId) in batchUploaded)
+                    bool attachSuccess = await TryAttachSingleFileAsync(FileId, kbId);
+                    if (!attachSuccess)
                     {
-                        if (updatedState.TryGetValue(FilePath, out var hash))
-                        {
-                            _fileState[FilePath] = hash;
-                        }
+                        Console.WriteLine($"  [Failed] Attach failed for file ID {FileId}. State not saved for this file.");
+                        continue;
                     }
-                    SaveState(_fileState);
-                    totalAttached += batchUploaded.Count;
-                    Console.WriteLine($"  [Success] Attached and saved batch. Total attached: {totalAttached}/{totalFiles}");
+
+                    if (updatedState.TryGetValue(FilePath, out var hash))
+                    {
+                        _fileState[FilePath] = hash;
+                    }
+
+                    attachedInBatch++;
                 }
-                else
+
+                if (attachedInBatch > 0)
                 {
-                    Console.WriteLine($"  [Failed] Attach failed for batch of {batchUploaded.Count} files. State not saved for this batch.");
+                    SaveState(_fileState);
+                    totalAttached += attachedInBatch;
+                    Console.WriteLine($"  [Success] Attached and saved {attachedInBatch}/{batchUploaded.Count} files in this batch. Total attached: {totalAttached}/{totalFiles}");
                 }
             }
         }
@@ -371,33 +376,41 @@ public class MultiRepoKnowledgeSync
         return null;
     }
 
-    private async Task<bool> AttachToKnowledgeBaseAsync(List<string> fileIds, string kbId)
+    private async Task<bool> TryAttachSingleFileAsync(string fileId, string kbId)
     {
-        var payload = new List<object>();
-        foreach (var id in fileIds) { payload.Add(new { file_id = id }); }
-
-        var content = new StringContent(JsonSerializer.Serialize(payload));
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-
         using var response = await ExecuteWithRetryAsync(
-            () => _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/files/batch/add", content),
-            "attach batch",
-            $"KB {kbId} ({fileIds.Count} files)");
+            () =>
+            {
+                var requestContent = CreateSingleAttachContent(fileId);
+                return _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/file/add", requestContent);
+            },
+            "attach file",
+            $"KB {kbId} (file {fileId})");
 
         if (response is null)
         {
-            Console.WriteLine($"  [Error] Batch attach failed for KB {kbId}. No response after retries.");
+            Console.WriteLine($"  [Error] Per-file attach failed for file {fileId}. No response after retries.");
             return false;
         }
-        
+
         if (!response.IsSuccessStatusCode)
         {
             string errorDetails = await response.Content.ReadAsStringAsync();
-            Console.WriteLine($"  [Error] Batch attach failed. Status: {response.StatusCode}. Details: {errorDetails}");
+            Console.WriteLine($"  [Error] Per-file attach failed for file {fileId}. Status: {response.StatusCode}. Details: {errorDetails}");
+            return false;
         }
-        
-        return response.IsSuccessStatusCode;
+
+        return true;
     }
+
+    private static StringContent CreateSingleAttachContent(string fileId)
+    {
+        var payload = new { file_id = fileId };
+        var content = new StringContent(JsonSerializer.Serialize(payload));
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        return content;
+    }
+
 
     private string ComputeFileHash(string filePath)
     {
@@ -493,44 +506,6 @@ public class MultiRepoKnowledgeSync
         return null;
     }
 
-    private async Task<int> AttachUploadedFilesInBatchesAsync(
-        List<(string FilePath, string FileId)> uploadedFiles,
-        Dictionary<string, string> updatedState,
-        string kbId)
-    {
-        int attachedCount = 0;
-
-        foreach (var batch in uploadedFiles.Chunk(AttachBatchSize))
-        {
-            var batchItems = new List<(string FilePath, string FileId)>(batch);
-            var fileIds = new List<string>(batchItems.Count);
-            foreach (var (FilePath, FileId) in batchItems)
-            {
-                fileIds.Add(FileId);
-            }
-
-            bool batchSuccess = await AttachToKnowledgeBaseAsync(fileIds, kbId);
-            if (!batchSuccess)
-            {
-                Console.WriteLine($"  [Failed] Skipping state update for failed attach batch ({fileIds.Count} files).");
-                continue;
-            }
-
-            foreach (var (FilePath, FileId) in batchItems)
-            {
-                if (updatedState.TryGetValue(FilePath, out var hash))
-                {
-                    _fileState[FilePath] = hash;
-                }
-            }
-
-            SaveState(_fileState);
-            attachedCount += batchItems.Count;
-            Console.WriteLine($"  [Success] Attached and saved batch. Progress: {attachedCount}/{uploadedFiles.Count}");
-        }
-
-        return attachedCount;
-    }
 
     private static string? ParseFileId(JsonElement root)
     {

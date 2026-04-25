@@ -157,7 +157,7 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
     }
 
     // -------------------------------------------------------------------------
-    // SyncDirectoryAsync — happy path: upload + attach + state saved
+    // SyncDirectoryAsync — happy path: upload + single-file attach + state saved
     // -------------------------------------------------------------------------
 
     [Fact]
@@ -180,15 +180,15 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
                 int n = Interlocked.Increment(ref uploadCounter);
                 return JsonOk($$"""{"id":"file-{{n:000}}"}""");
             }
-            if (req.Method == HttpMethod.Post && url.Contains("/files/batch/add"))
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
                 return JsonOk("{}");
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }, out var fake);
 
         await sync.SyncAllRepositoriesAsync(reposRoot);
 
-        // 1 KB GET + 2 file POSTs + 1 batch attach POST = 4 requests.
-        Assert.Equal(4, fake.RequestLog.Count);
+        // 1 KB GET + 2 file POSTs + 2 single-file attach POSTs = 5 requests.
+        Assert.Equal(5, fake.RequestLog.Count);
 
         // State file must exist and contain entries for both files.
         Assert.True(File.Exists(_stateFile));
@@ -212,7 +212,7 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
                 return JsonOk("""[{"id":"kb-1","name":"myrepo"}]""");
             if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
                 return JsonOk("""{"id":"file-001"}""");
-            if (req.Method == HttpMethod.Post && url.Contains("/files/batch/add"))
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
                 return JsonOk("{}");
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }, out _);
@@ -244,7 +244,7 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
             if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
                 return JsonOk("""{"id":"file-001"}""");
             // 400 Bad Request is not retried by ShouldRetry, so the test stays fast.
-            if (req.Method == HttpMethod.Post && url.Contains("/files/batch/add"))
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
                 return new HttpResponseMessage(HttpStatusCode.BadRequest);
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }, out _);
@@ -252,6 +252,33 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
         await sync.SyncAllRepositoriesAsync(reposRoot);
 
         Assert.False(File.Exists(_stateFile), "State file must not be written when attach fails.");
+    }
+
+    [Fact]
+    public async Task SyncDirectory_SingleFileAttach_SavesState()
+    {
+        var reposRoot = Path.Combine(_tempRoot, "repos");
+        var repoDir = Path.Combine(reposRoot, "myrepo");
+        Directory.CreateDirectory(repoDir);
+        var filePath = Path.Combine(repoDir, "doc.md");
+        File.WriteAllText(filePath, "# Doc");
+
+        var sync = CreateSync(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            if (req.Method == HttpMethod.Get && url.Contains("/api/v1/knowledge/"))
+                return JsonOk("""[{"id":"kb-1","name":"myrepo"}]""");
+            if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
+                return JsonOk("""{"id":"file-001"}""");
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
+                return JsonOk("{}");
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }, out var fake);
+
+        await sync.SyncAllRepositoriesAsync(reposRoot);
+
+        Assert.True(File.Exists(_stateFile), "State file should be written when single-file attach succeeds.");
+        Assert.Contains(fake.RequestLog, r => r.Method == "POST" && r.Url.Contains("/file/add"));
     }
 
     // -------------------------------------------------------------------------
@@ -278,15 +305,15 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
             // File upload.
             if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
                 return JsonOk("""{"id":"file-001"}""");
-            // Batch attach.
-            if (req.Method == HttpMethod.Post && url.Contains("/files/batch/add"))
+            // Single-file attach.
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
                 return JsonOk("{}");
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }, out var fake);
 
         await sync.SyncAllRepositoriesAsync(reposRoot);
 
-        // 1 GET (list) + 1 POST (create) + 1 POST (upload) + 1 POST (attach) = 4 requests.
+        // 1 GET (list) + 1 POST (create) + 1 POST (upload) + 1 POST (single-file attach) = 4 requests.
         Assert.Equal(4, fake.RequestLog.Count);
         Assert.True(File.Exists(_stateFile));
     }
@@ -310,7 +337,7 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
                 return JsonOk("""[{"id":"kb-1","name":"myrepo"}]""");
             if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
                 return JsonOk("""{"id":"file-001"}""");
-            if (req.Method == HttpMethod.Post && url.Contains("/files/batch/add"))
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
                 return JsonOk("{}");
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         };
