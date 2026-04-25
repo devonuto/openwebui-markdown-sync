@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -13,7 +14,7 @@ using System.Threading.Tasks;
 // 1. CONFIGURATION LOGIC
 // ==========================================
 string webuiUrl = Environment.GetEnvironmentVariable("WEBUI_URL") ?? "http://localhost:3000";
-string apiKey = Environment.GetEnvironmentVariable("API_KEY");
+string? apiKey = Environment.GetEnvironmentVariable("API_KEY");
 string stateFile = Environment.GetEnvironmentVariable("STATE_FILE") ?? "/data/sync_state.json";
 string rootReposPath = "/markdown-repos";
 string logsPath = "/logs";
@@ -61,6 +62,10 @@ public class MultiRepoKnowledgeSync
     private readonly string _baseUrl;
     private readonly string _stateFilePath;
     private Dictionary<string, string> _fileState;
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(1);
+    private const int MaxRetries = 5;
+    private const int AttachBatchSize = 50;
 
     public MultiRepoKnowledgeSync(string baseUrl, string apiKey, string stateFilePath)
     {
@@ -68,7 +73,7 @@ public class MultiRepoKnowledgeSync
         _stateFilePath = stateFilePath;
         _fileState = LoadState();
 
-        _client = new HttpClient();
+        _client = new HttpClient { Timeout = RequestTimeout };
         _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
     }
 
@@ -96,7 +101,7 @@ public class MultiRepoKnowledgeSync
 
             Console.WriteLine($"\n--- Processing repository: {repoName} ---");
 
-            string kbId = await GetOrCreateKnowledgeBaseAsync(repoName);
+            string? kbId = await GetOrCreateKnowledgeBaseAsync(repoName);
             if (string.IsNullOrEmpty(kbId))
             {
                 Console.WriteLine($"Failed to resolve Knowledge Base for {repoName}. Skipping directory.");
@@ -107,10 +112,20 @@ public class MultiRepoKnowledgeSync
         }
     }
 
-    private async Task<string> GetOrCreateKnowledgeBaseAsync(string repoName)
+    private async Task<string?> GetOrCreateKnowledgeBaseAsync(string repoName)
     {
         Console.WriteLine($"Checking if Knowledge Base '{repoName}' exists...");
-        var response = await _client.GetAsync($"{_baseUrl}/api/v1/knowledge/");
+        using var response = await ExecuteWithRetryAsync(
+            () => _client.GetAsync($"{_baseUrl}/api/v1/knowledge/"),
+            "fetch knowledge bases",
+            repoName);
+
+        if (response is null)
+        {
+            Console.WriteLine($"Warning: Failed to fetch knowledge bases for '{repoName}' after retries.");
+            return null;
+        }
+
         if (response.IsSuccessStatusCode)
         {
             var json = await response.Content.ReadAsStringAsync();
@@ -149,9 +164,12 @@ public class MultiRepoKnowledgeSync
             {
                 if (element.TryGetProperty("name", out var nameProp) && nameProp.GetString() == repoName)
                 {
-                    string id = element.GetProperty("id").GetString();
-                    Console.WriteLine($"Found existing Knowledge Base '{repoName}' (ID: {id}).");
-                    return id;
+                    string? id = element.GetProperty("id").GetString();
+                    if (!string.IsNullOrEmpty(id))
+                    {
+                        Console.WriteLine($"Found existing Knowledge Base '{repoName}' (ID: {id}).");
+                        return id;
+                    }
                 }
             }
         }
@@ -165,13 +183,23 @@ public class MultiRepoKnowledgeSync
         var content = new StringContent(JsonSerializer.Serialize(payload));
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-        var createResponse = await _client.PostAsync($"{_baseUrl}/api/v1/knowledge/create", content);
+        using var createResponse = await ExecuteWithRetryAsync(
+            () => _client.PostAsync($"{_baseUrl}/api/v1/knowledge/create", content),
+            "create knowledge base",
+            repoName);
+
+        if (createResponse is null)
+        {
+            Console.WriteLine($"Error creating Knowledge Base '{repoName}': no response after retries.");
+            return null;
+        }
+
         if (createResponse.IsSuccessStatusCode)
         {
             var createJson = await createResponse.Content.ReadAsStringAsync();
             using var createDoc = JsonDocument.Parse(createJson);
             
-            string newId = null;
+            string? newId = null;
             if (createDoc.RootElement.TryGetProperty("id", out var idProp))
             {
                 newId = idProp.GetString();
@@ -204,6 +232,7 @@ public class MultiRepoKnowledgeSync
         var markdownFiles = Directory.GetFiles(directoryPath, "*.md", options);
         var filesToUpload = new ConcurrentBag<string>();
         var updatedState = new Dictionary<string, string>(_fileState);
+        var uploadedFiles = new List<(string FilePath, string FileId)>();
 
         Console.WriteLine($"Scanning {markdownFiles.Length} Markdown files in '{new DirectoryInfo(directoryPath).Name}'...");
 
@@ -216,7 +245,7 @@ public class MultiRepoKnowledgeSync
             {
                 filesToUpload.Add(file);
                 lock (updatedState) { updatedState[file] = hash; }
-                Console.WriteLine($"  [Pending Sync] {Path.GetFileName(file)}");
+                Console.WriteLine($"  [Pending Sync] {Path.GetRelativePath(directoryPath, file)}");
             }
         });
 
@@ -227,18 +256,17 @@ public class MultiRepoKnowledgeSync
         }
 
         Console.WriteLine($"Uploading {filesToUpload.Count} new/modified files...");
-        var uploadedFileIds = new List<string>();
         int uploadCount = 0;
 
         var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
         await Parallel.ForEachAsync(filesToUpload, parallelOptions, async (file, token) =>
         {
-            string fileId = await UploadFileAsync(file);
+            string? fileId = await UploadFileAsync(file, directoryPath);
             if (!string.IsNullOrEmpty(fileId))
             {
-                lock (uploadedFileIds) 
+                lock (uploadedFiles)
                 { 
-                    uploadedFileIds.Add(fileId); 
+                    uploadedFiles.Add((file, fileId));
                     uploadCount++;
                     if (uploadCount % 50 == 0) 
                     {
@@ -248,20 +276,11 @@ public class MultiRepoKnowledgeSync
             }
         });
 
-        if (uploadedFileIds.Count > 0)
+        if (uploadedFiles.Count > 0)
         {
-            Console.WriteLine($"Attaching {uploadedFileIds.Count} successfully uploaded files to Knowledge Base...");
-            bool batchSuccess = await AttachToKnowledgeBaseAsync(uploadedFileIds, kbId);
-            if (batchSuccess)
-            {
-                _fileState = updatedState;
-                SaveState(_fileState);
-                Console.WriteLine("Synchronisation successful.");
-            }
-            else
-            {
-                Console.WriteLine("Synchronisation failed during the batch attachment phase.");
-            }
+            Console.WriteLine($"Attaching {uploadedFiles.Count} successfully uploaded files to Knowledge Base in batches of {AttachBatchSize}...");
+            int attachedCount = await AttachUploadedFilesInBatchesAsync(uploadedFiles, updatedState, kbId);
+            Console.WriteLine($"Synchronisation complete with {attachedCount}/{uploadedFiles.Count} uploaded files attached.");
         }
         else
         {
@@ -269,33 +288,52 @@ public class MultiRepoKnowledgeSync
         }
     }
     
-    private async Task<string> UploadFileAsync(string filePath)
+    private async Task<string?> UploadFileAsync(string filePath, string repoRootPath)
     {
-        string fileName = Path.GetFileName(filePath);
+        string relativePath = Path.GetRelativePath(repoRootPath, filePath);
         try
         {
-            using var content = new MultipartFormDataContent();
-            using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
-            content.Add(new StreamContent(fileStream), "file", fileName);
+            using var response = await ExecuteWithRetryAsync(
+                async () =>
+                {
+                    using var content = new MultipartFormDataContent();
+                    using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    content.Add(new StreamContent(fileStream), "file", Path.GetFileName(filePath));
+                    return await _client.PostAsync($"{_baseUrl}/api/v1/files/", content);
+                },
+                "upload file",
+                relativePath);
 
-            var response = await _client.PostAsync($"{_baseUrl}/api/v1/files/", content);
+            if (response is null)
+            {
+                Console.WriteLine($"  [Failed] Uploading {relativePath}. No response after retries.");
+                return null;
+            }
+
             if (response.IsSuccessStatusCode)
             {
                 var json = await response.Content.ReadAsStringAsync();
                 using var doc = JsonDocument.Parse(json);
-                string id = doc.RootElement.GetProperty("id").GetString();
-                Console.WriteLine($"  [Success] Uploaded {fileName} (File ID: {id})");
+                string? id = ParseFileId(doc.RootElement);
+
+                if (string.IsNullOrEmpty(id))
+                {
+                    Console.WriteLine($"  [Failed] Uploading {relativePath}. Upload succeeded but no file ID found.");
+                    return null;
+                }
+
+                Console.WriteLine($"  [Success] Uploaded {relativePath} (File ID: {id})");
                 return id;
             }
             else
             {
                 string error = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"  [Failed] Uploading {fileName}. Status: {response.StatusCode}. Details: {error}");
+                Console.WriteLine($"  [Failed] Uploading {relativePath}. Status: {response.StatusCode}. Details: {error}");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  [Error] Exception uploading {fileName}: {ex.Message}");
+            Console.WriteLine($"  [Error] Exception uploading {relativePath}: {ex.Message}");
         }
         return null;
     }
@@ -308,7 +346,16 @@ public class MultiRepoKnowledgeSync
         var content = new StringContent(JsonSerializer.Serialize(payload));
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-        var response = await _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/files/batch/add", content);
+        using var response = await ExecuteWithRetryAsync(
+            () => _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/files/batch/add", content),
+            "attach batch",
+            $"KB {kbId} ({fileIds.Count} files)");
+
+        if (response is null)
+        {
+            Console.WriteLine($"  [Error] Batch attach failed for KB {kbId}. No response after retries.");
+            return false;
+        }
         
         if (!response.IsSuccessStatusCode)
         {
@@ -352,6 +399,122 @@ public class MultiRepoKnowledgeSync
         var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(_stateFilePath, json);
         Console.WriteLine("State file updated successfully.");
+    }
+
+    private static bool ShouldRetry(HttpStatusCode statusCode)
+    {
+        return statusCode == HttpStatusCode.Unauthorized
+            || statusCode == HttpStatusCode.RequestTimeout
+            || statusCode == HttpStatusCode.TooManyRequests
+            || (int)statusCode >= 500;
+    }
+
+    private async Task<HttpResponseMessage?> ExecuteWithRetryAsync(
+        Func<Task<HttpResponseMessage>> operation,
+        string operationName,
+        string target)
+    {
+        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                var response = await operation();
+                if (response.IsSuccessStatusCode)
+                {
+                    return response;
+                }
+
+                if (!ShouldRetry(response.StatusCode) || attempt == MaxRetries)
+                {
+                    return response;
+                }
+
+                string body = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"  [Retry {attempt}/{MaxRetries}] {operationName} failed for '{target}'. Status: {response.StatusCode}. Retrying in 60s. Details: {body}");
+                response.Dispose();
+            }
+            catch (TaskCanceledException ex)
+            {
+                if (attempt == MaxRetries)
+                {
+                    Console.WriteLine($"  [Failed] {operationName} timed out for '{target}' after {MaxRetries} attempts. {ex.Message}");
+                    return null;
+                }
+
+                Console.WriteLine($"  [Retry {attempt}/{MaxRetries}] {operationName} timed out for '{target}'. Retrying in 60s.");
+            }
+            catch (HttpRequestException ex)
+            {
+                if (attempt == MaxRetries)
+                {
+                    Console.WriteLine($"  [Failed] {operationName} request error for '{target}' after {MaxRetries} attempts. {ex.Message}");
+                    return null;
+                }
+
+                Console.WriteLine($"  [Retry {attempt}/{MaxRetries}] {operationName} request error for '{target}'. Retrying in 60s. {ex.Message}");
+            }
+
+            await Task.Delay(RetryDelay);
+        }
+
+        return null;
+    }
+
+    private async Task<int> AttachUploadedFilesInBatchesAsync(
+        List<(string FilePath, string FileId)> uploadedFiles,
+        Dictionary<string, string> updatedState,
+        string kbId)
+    {
+        int attachedCount = 0;
+
+        foreach (var batch in uploadedFiles.Chunk(AttachBatchSize))
+        {
+            var batchItems = new List<(string FilePath, string FileId)>(batch);
+            var fileIds = new List<string>(batchItems.Count);
+            foreach (var item in batchItems)
+            {
+                fileIds.Add(item.FileId);
+            }
+
+            bool batchSuccess = await AttachToKnowledgeBaseAsync(fileIds, kbId);
+            if (!batchSuccess)
+            {
+                Console.WriteLine($"  [Failed] Skipping state update for failed attach batch ({fileIds.Count} files).");
+                continue;
+            }
+
+            foreach (var item in batchItems)
+            {
+                if (updatedState.TryGetValue(item.FilePath, out var hash))
+                {
+                    _fileState[item.FilePath] = hash;
+                }
+            }
+
+            SaveState(_fileState);
+            attachedCount += batchItems.Count;
+            Console.WriteLine($"  [Success] Attached and saved batch. Progress: {attachedCount}/{uploadedFiles.Count}");
+        }
+
+        return attachedCount;
+    }
+
+    private static string? ParseFileId(JsonElement root)
+    {
+        if (root.TryGetProperty("id", out var idProp))
+        {
+            return idProp.GetString();
+        }
+
+        if (root.TryGetProperty("data", out var dataProp))
+        {
+            if (dataProp.ValueKind == JsonValueKind.Object && dataProp.TryGetProperty("id", out var dataIdProp))
+            {
+                return dataIdProp.GetString();
+            }
+        }
+
+        return null;
     }
 }
 
