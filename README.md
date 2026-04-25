@@ -96,12 +96,6 @@ Build the image once before scheduling:
 docker compose build
 ```
 
-If you are starting from a clean checkout, first copy the example compose file:
-
-```bash
-cp compose.yaml.example compose.yaml
-```
-
 ### On-demand sync
 
 Use `--rm` so the container is automatically removed after each run, keeping things clean:
