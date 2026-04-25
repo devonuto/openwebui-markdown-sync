@@ -114,15 +114,11 @@ This writes application logs to `./logs/` automatically. Additional shell redire
 
 ### Scheduled syncing on Synology
 
-Set up two **Synology Task Scheduler** tasks (Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script). Run them under a user with Docker access (e.g. your admin account).
-
-#### Task 1 — Pull latest docs from GitHub
-
-Create one task per repository, or a single script that loops over all of them:
+Set up a single **Synology Task Scheduler** task (Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script). Run it under a user with Docker access (e.g. your admin account).
 
 | Setting | Value |
 | -- | -- |
-| **Task name** | `git-pull-markdown-repos` |
+| **Task name** | `openwebui-markdown-sync` |
 | **Schedule** | e.g. daily at 02:00 |
 | **User** | Your Synology user |
 
@@ -130,41 +126,51 @@ Create one task per repository, or a single script that loops over all of them:
 
 ```bash
 #!/bin/bash
+
+# 1. Skip if a sync is already running
+if [ "$(docker ps -q --filter "name=openwebui-markdown-sync")" ]; then
+    echo "The container is already running. Exiting."
+    exit 1
+fi
+
+# 2. Pull the latest docs from every cloned repository
 for repo in /path/to/openwebui-markdown-sync/markdown-repos/*/; do
+    echo "Updating $repo..."
     git -C "$repo" pull --ff-only
 done
+
+# 3. Run the sync container (the for loop above must finish before this line)
+cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync
 ```
-
-#### Task 2 — Run the sync container
-
-| Setting | Value |
-| -- | -- |
-| **Task name** | `openwebui-markdown-sync` |
-| **Schedule** | e.g. daily at 02:30 (after Task 1 completes) |
-| **User** | Your Synology user |
-
-**Script:**
-
-```bash
-#!/bin/bash
-cd /path/to/openwebui-markdown-sync
-docker compose run --rm openwebui-markdown-sync
-```
-
-> **Tip:** Give Task 2 a 30-minute offset from Task 1 to ensure the pulls have finished before the sync runs. For large repositories you may need a longer gap.
 
 The container will append to `./logs/YYYY-MM-DD_Container.log` for that day and remove logs older than 14 days automatically.
 
 ### Scheduled syncing on Linux
 
-Add two cron entries via `crontab -e`:
+Save the script below (e.g. to `/usr/local/bin/openwebui-markdown-sync.sh`), make it executable (`chmod +x`), then add a single cron entry via `crontab -e`:
+
+```bash
+#!/bin/bash
+
+# 1. Skip if a sync is already running
+if [ "$(docker ps -q --filter "name=openwebui-markdown-sync")" ]; then
+    echo "The container is already running. Exiting."
+    exit 1
+fi
+
+# 2. Pull the latest docs from every cloned repository
+for repo in /path/to/openwebui-markdown-sync/markdown-repos/*/; do
+    echo "Updating $repo..."
+    git -C "$repo" pull --ff-only
+done
+
+# 3. Run the sync container (the for loop above must finish before this line)
+cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync
+```
 
 ```cron
-# Task 1 — Pull latest docs from GitHub (runs daily at 02:00)
-0 2 * * * for repo in /path/to/openwebui-markdown-sync/markdown-repos/*/; do git -C "$repo" pull --ff-only; done
-
-# Task 2 — Run the sync container (runs daily at 02:30, after pulls complete)
-30 2 * * * cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync
+# Run daily at 02:00
+0 2 * * * /usr/local/bin/openwebui-markdown-sync.sh
 ```
 
 Application logs are already persisted to `./logs/YYYY-MM-DD_Container.log`, so cron redirection is optional.
