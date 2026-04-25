@@ -232,7 +232,6 @@ public class MultiRepoKnowledgeSync
         var markdownFiles = Directory.GetFiles(directoryPath, "*.md", options);
         var filesToUpload = new ConcurrentBag<string>();
         var updatedState = new Dictionary<string, string>(_fileState);
-        var uploadedFiles = new List<(string FilePath, string FileId)>();
 
         Console.WriteLine($"Scanning {markdownFiles.Length} Markdown files in '{new DirectoryInfo(directoryPath).Name}'...");
 
@@ -255,37 +254,60 @@ public class MultiRepoKnowledgeSync
             return;
         }
 
-        Console.WriteLine($"Uploading {filesToUpload.Count} new/modified files...");
-        int uploadCount = 0;
+        var filesToUploadList = filesToUpload.ToList();
+        int totalFiles = filesToUploadList.Count;
+        int totalAttached = 0;
+        int totalProcessed = 0;
+
+        Console.WriteLine($"Processing {totalFiles} new/modified files in batches of {AttachBatchSize}...");
 
         var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
-        await Parallel.ForEachAsync(filesToUpload, parallelOptions, async (file, token) =>
+
+        foreach (var chunk in filesToUploadList.Chunk(AttachBatchSize))
         {
-            string? fileId = await UploadFileAsync(file, directoryPath);
-            if (!string.IsNullOrEmpty(fileId))
+            var batchFiles = chunk.ToList();
+            var batchUploaded = new List<(string FilePath, string FileId)>();
+
+            await Parallel.ForEachAsync(batchFiles, parallelOptions, async (file, token) =>
             {
-                lock (uploadedFiles)
-                { 
-                    uploadedFiles.Add((file, fileId));
-                    uploadCount++;
-                    if (uploadCount % 50 == 0) 
+                string? fileId = await UploadFileAsync(file, directoryPath);
+                if (!string.IsNullOrEmpty(fileId))
+                {
+                    lock (batchUploaded)
                     {
-                        Console.WriteLine($"  ...Uploaded {uploadCount}/{filesToUpload.Count} files...");
+                        batchUploaded.Add((file, fileId));
                     }
                 }
-            }
-        });
+            });
 
-        if (uploadedFiles.Count > 0)
-        {
-            Console.WriteLine($"Attaching {uploadedFiles.Count} successfully uploaded files to Knowledge Base in batches of {AttachBatchSize}...");
-            int attachedCount = await AttachUploadedFilesInBatchesAsync(uploadedFiles, updatedState, kbId);
-            Console.WriteLine($"Synchronisation complete with {attachedCount}/{uploadedFiles.Count} uploaded files attached.");
+            totalProcessed += batchFiles.Count;
+            Console.WriteLine($"  ...Uploaded {batchUploaded.Count}/{batchFiles.Count} in this batch. Progress: {totalProcessed}/{totalFiles}");
+
+            if (batchUploaded.Count > 0)
+            {
+                var fileIds = batchUploaded.Select(x => x.FileId).ToList();
+                bool attachSuccess = await AttachToKnowledgeBaseAsync(fileIds, kbId);
+                if (attachSuccess)
+                {
+                    foreach (var (FilePath, FileId) in batchUploaded)
+                    {
+                        if (updatedState.TryGetValue(FilePath, out var hash))
+                        {
+                            _fileState[FilePath] = hash;
+                        }
+                    }
+                    SaveState(_fileState);
+                    totalAttached += batchUploaded.Count;
+                    Console.WriteLine($"  [Success] Attached and saved batch. Total attached: {totalAttached}/{totalFiles}");
+                }
+                else
+                {
+                    Console.WriteLine($"  [Failed] Attach failed for batch of {batchUploaded.Count} files. State not saved for this batch.");
+                }
+            }
         }
-        else
-        {
-            Console.WriteLine("No files were successfully uploaded. Skipping attachment phase.");
-        }
+
+        Console.WriteLine($"Synchronisation complete with {totalAttached}/{totalFiles} files attached.");
     }
     
     private async Task<string?> UploadFileAsync(string filePath, string repoRootPath)
@@ -471,9 +493,9 @@ public class MultiRepoKnowledgeSync
         {
             var batchItems = new List<(string FilePath, string FileId)>(batch);
             var fileIds = new List<string>(batchItems.Count);
-            foreach (var item in batchItems)
+            foreach (var (FilePath, FileId) in batchItems)
             {
-                fileIds.Add(item.FileId);
+                fileIds.Add(FileId);
             }
 
             bool batchSuccess = await AttachToKnowledgeBaseAsync(fileIds, kbId);
@@ -483,11 +505,11 @@ public class MultiRepoKnowledgeSync
                 continue;
             }
 
-            foreach (var item in batchItems)
+            foreach (var (FilePath, FileId) in batchItems)
             {
-                if (updatedState.TryGetValue(item.FilePath, out var hash))
+                if (updatedState.TryGetValue(FilePath, out var hash))
                 {
-                    _fileState[item.FilePath] = hash;
+                    _fileState[FilePath] = hash;
                 }
             }
 
