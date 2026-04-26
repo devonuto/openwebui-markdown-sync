@@ -79,7 +79,11 @@ public class MultiRepoKnowledgeSync
         _retryDelay = GetRetryDelayFromEnvironment();
         _maxRetries = GetMaxRetriesFromEnvironment();
 
-        _client = new HttpClient { Timeout = RequestTimeout };
+        _client = new HttpClient(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+        })
+        { Timeout = RequestTimeout };
         _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
     }
 
