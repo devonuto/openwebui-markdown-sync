@@ -66,25 +66,35 @@ public class MultiRepoKnowledgeSync
     private readonly string _stateFilePath;
     private Dictionary<string, string> _fileState;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(1);
-    private const int MaxRetries = 5;
-    private const int AttachBatchSize = 50;
+    private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromMinutes(1);
+    private const int DefaultMaxRetries = 5;
+    private readonly TimeSpan _retryDelay;
+    private readonly int _maxRetries;
 
     public MultiRepoKnowledgeSync(string baseUrl, string apiKey, string stateFilePath)
     {
         _baseUrl = baseUrl.TrimEnd('/');
         _stateFilePath = stateFilePath;
         _fileState = LoadState();
+        _retryDelay = GetRetryDelayFromEnvironment();
+        _maxRetries = GetMaxRetriesFromEnvironment();
 
         _client = new HttpClient { Timeout = RequestTimeout };
         _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
     }
 
     internal MultiRepoKnowledgeSync(string baseUrl, string apiKey, string stateFilePath, HttpClient httpClient)
+        : this(baseUrl, apiKey, stateFilePath, httpClient, DefaultRetryDelay, DefaultMaxRetries)
+    {
+    }
+
+    internal MultiRepoKnowledgeSync(string baseUrl, string apiKey, string stateFilePath, HttpClient httpClient, TimeSpan retryDelay, int maxRetries)
     {
         _baseUrl = baseUrl.TrimEnd('/');
         _stateFilePath = stateFilePath;
         _fileState = LoadState();
+        _retryDelay = retryDelay;
+        _maxRetries = maxRetries;
         _client = httpClient;
         _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
     }
@@ -270,57 +280,34 @@ public class MultiRepoKnowledgeSync
         int totalAttached = 0;
         int totalProcessed = 0;
 
-        Console.WriteLine($"Processing {totalFiles} new/modified files in batches of {AttachBatchSize}...");
+        Console.WriteLine($"Processing {totalFiles} new/modified files one at a time...");
 
-        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
-
-        foreach (var chunk in filesToUploadList.Chunk(AttachBatchSize))
+        foreach (var filePath in filesToUploadList)
         {
-            var batchFiles = chunk.ToList();
-            var batchUploaded = new List<(string FilePath, string FileId)>();
-
-            await Parallel.ForEachAsync(batchFiles, parallelOptions, async (file, token) =>
+            totalProcessed++;
+            string? fileId = await UploadFileAsync(filePath, directoryPath);
+            if (string.IsNullOrEmpty(fileId))
             {
-                string? fileId = await UploadFileAsync(file, directoryPath);
-                if (!string.IsNullOrEmpty(fileId))
-                {
-                    lock (batchUploaded)
-                    {
-                        batchUploaded.Add((file, fileId));
-                    }
-                }
-            });
-
-            totalProcessed += batchFiles.Count;
-            Console.WriteLine($"  ...Uploaded {batchUploaded.Count}/{batchFiles.Count} in this batch. Progress: {totalProcessed}/{totalFiles}");
-
-            if (batchUploaded.Count > 0)
-            {
-                int attachedInBatch = 0;
-                foreach (var (FilePath, FileId) in batchUploaded)
-                {
-                    bool attachSuccess = await TryAttachSingleFileAsync(FileId, kbId);
-                    if (!attachSuccess)
-                    {
-                        Console.WriteLine($"  [Failed] Attach failed for file ID {FileId}. State not saved for this file.");
-                        continue;
-                    }
-
-                    if (updatedState.TryGetValue(FilePath, out var hash))
-                    {
-                        _fileState[FilePath] = hash;
-                    }
-
-                    attachedInBatch++;
-                }
-
-                if (attachedInBatch > 0)
-                {
-                    SaveState(_fileState);
-                    totalAttached += attachedInBatch;
-                    Console.WriteLine($"  [Success] Attached and saved {attachedInBatch}/{batchUploaded.Count} files in this batch. Total attached: {totalAttached}/{totalFiles}");
-                }
+                Console.WriteLine($"  [Progress] {totalProcessed}/{totalFiles} processed. Upload failed, skipping attach.");
+                continue;
             }
+
+            bool attachSuccess = await TryAttachSingleFileAsync(fileId, kbId);
+            if (!attachSuccess)
+            {
+                Console.WriteLine($"  [Failed] Attach failed for file ID {fileId}. State not saved for this file.");
+                Console.WriteLine($"  [Progress] {totalProcessed}/{totalFiles} processed. Total attached: {totalAttached}/{totalFiles}");
+                continue;
+            }
+
+            if (updatedState.TryGetValue(filePath, out var hash))
+            {
+                _fileState[filePath] = hash;
+            }
+
+            SaveState(_fileState);
+            totalAttached++;
+            Console.WriteLine($"  [Success] Attached and saved 1 file. Progress: {totalProcessed}/{totalFiles}. Total attached: {totalAttached}/{totalFiles}");
         }
 
         Console.WriteLine($"Synchronisation complete with {totalAttached}/{totalFiles} files attached.");
@@ -379,11 +366,7 @@ public class MultiRepoKnowledgeSync
     private async Task<bool> TryAttachSingleFileAsync(string fileId, string kbId)
     {
         using var response = await ExecuteWithRetryAsync(
-            () =>
-            {
-                var requestContent = CreateSingleAttachContent(fileId);
-                return _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/file/add", requestContent);
-            },
+            () => SendSingleAttachRequestAsync(fileId, kbId),
             "attach file",
             $"KB {kbId} (file {fileId})");
 
@@ -393,19 +376,65 @@ public class MultiRepoKnowledgeSync
             return false;
         }
 
-        if (!response.IsSuccessStatusCode)
+        if (response.IsSuccessStatusCode)
         {
-            string errorDetails = await response.Content.ReadAsStringAsync();
-            Console.WriteLine($"  [Error] Per-file attach failed for file {fileId}. Status: {response.StatusCode}. Details: {errorDetails}");
+            return true;
+        }
+
+        string primaryErrorDetails = await response.Content.ReadAsStringAsync();
+        if (!ShouldAttemptAlternateAttach(response.StatusCode, primaryErrorDetails))
+        {
+            Console.WriteLine($"  [Error] Per-file attach failed for file {fileId}. Status: {response.StatusCode}. Details: {primaryErrorDetails}");
             return false;
         }
 
+        Console.WriteLine($"  [Info] Retrying attach with alternate endpoint for file {fileId}.");
+        using var fallbackResponse = await ExecuteWithRetryAsync(
+            () => SendBatchAttachRequestAsync(fileId, kbId),
+            "attach file (fallback endpoint)",
+            $"KB {kbId} (file {fileId})");
+
+        if (fallbackResponse is null)
+        {
+            Console.WriteLine($"  [Error] Fallback attach failed for file {fileId}. No response after retries.");
+            return false;
+        }
+
+        if (!fallbackResponse.IsSuccessStatusCode)
+        {
+            string fallbackErrorDetails = await fallbackResponse.Content.ReadAsStringAsync();
+            Console.WriteLine($"  [Error] Fallback attach failed for file {fileId}. Status: {fallbackResponse.StatusCode}. Details: {fallbackErrorDetails}");
+            return false;
+        }
+
+        Console.WriteLine($"  [Success] Fallback attach succeeded for file {fileId}.");
+
         return true;
+    }
+
+    private Task<HttpResponseMessage> SendSingleAttachRequestAsync(string fileId, string kbId)
+    {
+        var requestContent = CreateSingleAttachContent(fileId);
+        return _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/file/add", requestContent);
+    }
+
+    private Task<HttpResponseMessage> SendBatchAttachRequestAsync(string fileId, string kbId)
+    {
+        var requestContent = CreateBatchAttachContent(fileId);
+        return _client.PostAsync($"{_baseUrl}/api/v1/knowledge/{kbId}/files/add", requestContent);
     }
 
     private static StringContent CreateSingleAttachContent(string fileId)
     {
         var payload = new { file_id = fileId };
+        var content = new StringContent(JsonSerializer.Serialize(payload));
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        return content;
+    }
+
+    private static StringContent CreateBatchAttachContent(string fileId)
+    {
+        var payload = new { file_ids = new[] { fileId } };
         var content = new StringContent(JsonSerializer.Serialize(payload));
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         return content;
@@ -447,12 +476,78 @@ public class MultiRepoKnowledgeSync
         Console.WriteLine("State file updated successfully.");
     }
 
-    private static bool ShouldRetry(HttpStatusCode statusCode)
+    private static bool ShouldRetry(HttpStatusCode statusCode, string responseBody, string operationName)
     {
+        if (statusCode == HttpStatusCode.BadRequest && IsTransientBadRequest(responseBody, operationName))
+        {
+            return true;
+        }
+
         return statusCode == HttpStatusCode.Unauthorized
             || statusCode == HttpStatusCode.RequestTimeout
             || statusCode == HttpStatusCode.TooManyRequests
             || (int)statusCode >= 500;
+    }
+
+    private static bool IsTransientBadRequest(string responseBody, string operationName)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+        {
+            return false;
+        }
+
+        if (!operationName.Contains("upload", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Contains("attach", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return responseBody.Contains("error uploading file", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("temporarily", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("try again", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("connection", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("failed to process", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldAttemptAlternateAttach(HttpStatusCode statusCode, string responseBody)
+    {
+        if (statusCode == HttpStatusCode.NotFound || statusCode == HttpStatusCode.MethodNotAllowed)
+        {
+            return true;
+        }
+
+        if (statusCode != HttpStatusCode.BadRequest || string.IsNullOrWhiteSpace(responseBody))
+        {
+            return false;
+        }
+
+        return responseBody.Contains("file_ids", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("files/add", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("invalid payload", StringComparison.OrdinalIgnoreCase)
+            || responseBody.Contains("missing", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static TimeSpan GetRetryDelayFromEnvironment()
+    {
+        var raw = Environment.GetEnvironmentVariable("RETRY_DELAY_SECONDS");
+        if (int.TryParse(raw, out int seconds) && seconds > 0)
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return DefaultRetryDelay;
+    }
+
+    private static int GetMaxRetriesFromEnvironment()
+    {
+        var raw = Environment.GetEnvironmentVariable("MAX_RETRIES");
+        if (int.TryParse(raw, out int retries) && retries > 0)
+        {
+            return retries;
+        }
+
+        return DefaultMaxRetries;
     }
 
     private async Task<HttpResponseMessage?> ExecuteWithRetryAsync(
@@ -460,7 +555,7 @@ public class MultiRepoKnowledgeSync
         string operationName,
         string target)
     {
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        for (int attempt = 1; attempt <= _maxRetries; attempt++)
         {
             try
             {
@@ -470,37 +565,45 @@ public class MultiRepoKnowledgeSync
                     return response;
                 }
 
-                if (!ShouldRetry(response.StatusCode) || attempt == MaxRetries)
+                string body = await response.Content.ReadAsStringAsync();
+                bool shouldRetry = ShouldRetry(response.StatusCode, body, operationName);
+
+                if (!shouldRetry)
+                {
+                    Console.WriteLine($"  [No Retry] {operationName} failed for '{target}'. Status: {response.StatusCode}. Classified as non-retryable. Details: {body}");
+                    return response;
+                }
+
+                if (attempt == _maxRetries)
                 {
                     return response;
                 }
 
-                string body = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"  [Retry {attempt}/{MaxRetries}] {operationName} failed for '{target}'. Status: {response.StatusCode}. Retrying in 60s. Details: {body}");
+                Console.WriteLine($"  [Retry {attempt}/{_maxRetries}] {operationName} failed for '{target}'. Status: {response.StatusCode}. Retrying in {(int)_retryDelay.TotalSeconds}s. Details: {body}");
                 response.Dispose();
             }
             catch (TaskCanceledException ex)
             {
-                if (attempt == MaxRetries)
+                if (attempt == _maxRetries)
                 {
-                    Console.WriteLine($"  [Failed] {operationName} timed out for '{target}' after {MaxRetries} attempts. {ex.Message}");
+                    Console.WriteLine($"  [Failed] {operationName} timed out for '{target}' after {_maxRetries} attempts. {ex.Message}");
                     return null;
                 }
 
-                Console.WriteLine($"  [Retry {attempt}/{MaxRetries}] {operationName} timed out for '{target}'. Retrying in 60s.");
+                Console.WriteLine($"  [Retry {attempt}/{_maxRetries}] {operationName} timed out for '{target}'. Retrying in {(int)_retryDelay.TotalSeconds}s.");
             }
             catch (HttpRequestException ex)
             {
-                if (attempt == MaxRetries)
+                if (attempt == _maxRetries)
                 {
-                    Console.WriteLine($"  [Failed] {operationName} request error for '{target}' after {MaxRetries} attempts. {ex.Message}");
+                    Console.WriteLine($"  [Failed] {operationName} request error for '{target}' after {_maxRetries} attempts. {ex.Message}");
                     return null;
                 }
 
-                Console.WriteLine($"  [Retry {attempt}/{MaxRetries}] {operationName} request error for '{target}'. Retrying in 60s. {ex.Message}");
+                Console.WriteLine($"  [Retry {attempt}/{_maxRetries}] {operationName} request error for '{target}'. Retrying in {(int)_retryDelay.TotalSeconds}s. {ex.Message}");
             }
 
-            await Task.Delay(RetryDelay);
+            await Task.Delay(_retryDelay);
         }
 
         return null;

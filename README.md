@@ -75,6 +75,8 @@ Copy `.env.example` (or create `.env`) and populate the following variables:
 | `WEBUI_URL` | Base URL of your Open WebUI instance | `http://localhost:3000` |
 | `API_KEY` | Bearer token for the Open WebUI API | *(required)* |
 | `STATE_FILE` | Path inside the container where sync state is persisted | `/data/sync_state.json` |
+| `RETRY_DELAY_SECONDS` | Delay between retry attempts for transient API errors | `60` |
+| `MAX_RETRIES` | Maximum retry attempts per API call | `5` |
 
 > **Security note:** The `.env` file contains your API key and is excluded from version control via `.gitignore`. Never commit it.
 

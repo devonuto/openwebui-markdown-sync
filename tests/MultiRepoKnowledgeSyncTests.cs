@@ -30,12 +30,21 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
     // Helpers
     // -------------------------------------------------------------------------
 
-    private MultiRepoKnowledgeSync CreateSync(Func<HttpRequestMessage, HttpResponseMessage> handler,
-        out FakeHttpMessageHandler fake)
+    private MultiRepoKnowledgeSync CreateSync(
+        Func<HttpRequestMessage, HttpResponseMessage> handler,
+        out FakeHttpMessageHandler fake,
+        TimeSpan? retryDelay = null,
+        int? maxRetries = null)
     {
         fake = new FakeHttpMessageHandler(handler);
         var client = new HttpClient(fake);
-        return new MultiRepoKnowledgeSync("http://test", "test-key", _stateFile, client);
+        return new MultiRepoKnowledgeSync(
+            "http://test",
+            "test-key",
+            _stateFile,
+            client,
+            retryDelay ?? TimeSpan.FromMinutes(1),
+            maxRetries ?? 5);
     }
 
     private static HttpResponseMessage JsonOk(string json) =>
@@ -279,6 +288,78 @@ public sealed class MultiRepoKnowledgeSyncTests : IDisposable
 
         Assert.True(File.Exists(_stateFile), "State file should be written when single-file attach succeeds.");
         Assert.Contains(fake.RequestLog, r => r.Method == "POST" && r.Url.Contains("/file/add"));
+    }
+
+    [Fact]
+    public async Task SyncDirectory_AttachFallbackEndpoint_SucceedsAndSavesState()
+    {
+        var reposRoot = Path.Combine(_tempRoot, "repos");
+        var repoDir = Path.Combine(reposRoot, "myrepo");
+        Directory.CreateDirectory(repoDir);
+        var filePath = Path.Combine(repoDir, "doc.md");
+        File.WriteAllText(filePath, "# Doc");
+
+        var sync = CreateSync(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            if (req.Method == HttpMethod.Get && url.Contains("/api/v1/knowledge/"))
+                return JsonOk("""[{"id":"kb-1","name":"myrepo"}]""");
+            if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
+                return JsonOk("""{"id":"file-001"}""");
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            if (req.Method == HttpMethod.Post && url.Contains("/files/add"))
+                return JsonOk("{}");
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }, out var fake);
+
+        await sync.SyncAllRepositoriesAsync(reposRoot);
+
+        Assert.True(File.Exists(_stateFile), "State file should be written when fallback attach succeeds.");
+        Assert.Contains(fake.RequestLog, r => r.Method == "POST" && r.Url.Contains("/file/add"));
+        Assert.Contains(fake.RequestLog, r => r.Method == "POST" && r.Url.Contains("/files/add"));
+    }
+
+    [Fact]
+    public async Task SyncDirectory_UploadTransientBadRequest_RetriesThenSucceeds()
+    {
+        var reposRoot = Path.Combine(_tempRoot, "repos");
+        var repoDir = Path.Combine(reposRoot, "myrepo");
+        Directory.CreateDirectory(repoDir);
+        File.WriteAllText(Path.Combine(repoDir, "doc.md"), "# Doc");
+
+        int uploadAttempts = 0;
+        var sync = CreateSync(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            if (req.Method == HttpMethod.Get && url.Contains("/api/v1/knowledge/"))
+                return JsonOk("""[{"id":"kb-1","name":"myrepo"}]""");
+
+            if (req.Method == HttpMethod.Post && url.EndsWith("/api/v1/files/"))
+            {
+                uploadAttempts++;
+                if (uploadAttempts == 1)
+                {
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent("{" + "\"detail\":\"[ERROR: Error uploading file: temporary backend failure]\"}")
+                    };
+                }
+
+                return JsonOk("""{"id":"file-001"}""");
+            }
+
+            if (req.Method == HttpMethod.Post && url.Contains("/file/add"))
+                return JsonOk("{}");
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }, out var fake, retryDelay: TimeSpan.FromMilliseconds(1), maxRetries: 2);
+
+        await sync.SyncAllRepositoriesAsync(reposRoot);
+
+        Assert.Equal(2, uploadAttempts);
+        Assert.Contains(fake.RequestLog, r => r.Method == "POST" && r.Url.EndsWith("/api/v1/files/"));
+        Assert.True(File.Exists(_stateFile), "State file should be written after retry succeeds.");
     }
 
     // -------------------------------------------------------------------------
