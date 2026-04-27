@@ -30,9 +30,11 @@ The tool returns a JSON summary with per-KB breakdowns (discovered / imported / 
 ## Installation
 
 1. In Open WebUI, go to **Workspace → Tools**.
-2. Click **+** to add a new tool.
-3. Paste the contents of [`local_directory_import.py`](local_directory_import.py) into the editor.
+2. Click **Import** (or the **+** flow that accepts JSON).
+3. Select [`local_directory_import.tool.json`](local_directory_import.tool.json).
 4. Save.
+
+> **Fallback:** If your build only shows a raw Python editor, paste the contents of [`local_directory_import.py`](local_directory_import.py) directly and save.
 
 ## Configuration (Valves)
 
@@ -170,6 +172,18 @@ Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
 ---
 
 ## Development
+
+Keep the JSON import file in sync with Python source:
+
+```bash
+python sync_tool_json.py
+```
+
+Auto-sync while you edit the Python plugin:
+
+```bash
+python sync_tool_json.py --watch
+```
 
 Run the unit tests (no live Open WebUI instance required):
 
