@@ -1,192 +1,182 @@
-# openwebui-markdown-sync
+# Local Directory Import — Open WebUI Tool Plugin
 
-A lightweight .NET containerised tool that syncs Markdown documentation from locally-cloned GitHub repositories into [Open WebUI](https://github.com/open-webui/open-webui) Knowledge Bases. It is designed to run as a one-shot Docker container — on a schedule or on demand — and only uploads files that are new or have changed since the last run.
+An [Open WebUI Tool plugin](https://docs.openwebui.com/features/extensibility/plugin/) that bulk-imports files from a local server-side drop folder into Open WebUI Knowledge Bases.
 
 ## How it works
 
-1. The container scans a root directory that contains one or more cloned GitHub documentation repositories (e.g. `microsoft/vscode-docs`, `dotnet/docs`).
-2. For each subdirectory it finds, it locates or creates a matching Knowledge Base in Open WebUI (named after the repository folder).
-3. It computes an MD5 hash for every `.md` file and compares it against a persisted state file. Only new or modified files are uploaded.
-4. Uploaded files are batch-attached to their Knowledge Base via the Open WebUI API.
-5. The updated state is saved so subsequent runs only process what has actually changed.
+Point the tool at a drop folder on the server's local filesystem. Each **immediate subfolder** of that folder is treated as a target Knowledge Base — the KB is created automatically if it does not already exist. All files found recursively inside each subfolder are then:
 
-## Markdown repositories
+1. Hashed with SHA-256 — if a file with the same hash already exists in the database it is skipped
+2. Copied into Open WebUI's upload directory (`UPLOAD_DIR`)
+3. Registered as a file record in the database (with its SHA-256 hash stored)
+4. Linked to the corresponding Knowledge Base
+5. Vectorized via the retrieval pipeline
 
-The repositories synced by this tool are GitHub-hosted documentation sources — primarily from the [GitHub Docs](https://github.com/github/docs) ecosystem and other open-source documentation projects. They are cloned locally and placed in the `markdown-repos/` subdirectory inside this project. That folder is volume-mounted into the container and excluded from version control via `.gitignore`. Each repository's folder name becomes the name of the corresponding Knowledge Base in Open WebUI, so keeping repository folder names descriptive is recommended.
+The tool returns a JSON summary with per-KB breakdowns (discovered / imported / linked / processed / skipped / failed counts, plus per-file status).
 
-### Cloning repositories
-
-Clone repositories using SSH to avoid credential prompts in automated tasks:
+### Example folder layout
 
 ```bash
-cd /path/to/openwebui-markdown-sync/markdown-repos
-git clone git@github.com:org/repo-name.git
+/data/drop/
+├── project-alpha/          →  KB: "project-alpha"
+│   ├── notes.md
+│   └── specs/
+│       └── design.pdf
+└── onboarding/             →  KB: "onboarding"
+    ├── handbook.docx
+    └── faq.txt
 ```
 
-### Git safe.directory
+## Installation
 
-If your scheduled tasks run as `root` (common on Synology and in Docker contexts), Git will refuse to operate on repositories owned by a different user unless they are marked as safe. Run the following for each cloned repository:
+1. In Open WebUI, go to **Workspace → Tools**.
+2. Click **+** to add a new tool.
+3. Paste the contents of [`local_directory_import.py`](local_directory_import.py) into the editor.
+4. Save.
+
+## Configuration (Valves)
+
+| Valve | Type | Default | Description |
+| -- | -- | -- | -- |
+| `allowed_base_dirs` | `list[str]` | `[]` (deny all) | Absolute paths that are permitted as drop-folder roots. The `drop_folder` argument must resolve to a path inside one of these directories. |
+
+> **Important:** `allowed_base_dirs` defaults to an empty list, which **denies all imports**. Add at least one permitted base directory before use.
+
+## Usage
+
+The tool exposes a single function that the LLM (or a user with admin rights) can invoke:
 
 ```bash
-sudo git config --global --add safe.directory /path/to/openwebui-markdown-sync/markdown-repos/repo-name
+import_local_directory(drop_folder: str) → str (JSON)
 ```
 
-Or to trust all repositories under the `markdown-repos/` folder at once:
+### **Parameters**
 
-```bash
-sudo git config --global --add safe.directory '*'
-```
-
-> **Note:** Using `*` is convenient but disables the ownership check globally for root. Use per-repo entries if you prefer a stricter security posture.
-
-## Prerequisites
-
-| Requirement | Notes |
+| Parameter | Description |
 | -- | -- |
-| **Docker / Docker Compose** | Tested on Synology DSM with Container Manager |
-| **Open WebUI** | Must be running and reachable at `WEBUI_URL`; v0.3+ recommended |
-| **Open WebUI API key** | Generate one in Open WebUI → Settings → Account → API Keys |
-| **Cloned markdown repositories** | One or more Git repositories cloned under `./markdown-repos` |
-| **.NET 10 runtime** | Provided by the Docker image; no local install needed |
+| `drop_folder` | Absolute path to the root folder containing the per-KB subfolders. |
 
-## Folder setup
+### **Example prompt**
 
-Create the runtime folders before the first run:
+> Import the documents in `/data/drop` into the knowledge bases.
 
-```bash
-mkdir -p data logs markdown-repos
+### **Example response (truncated)**
+
+```json
+{
+  "drop_folder": "/data/drop",
+  "total_discovered": 3,
+  "total_imported": 2,
+  "total_linked": 2,
+  "total_processed": 2,
+  "total_skipped": 1,
+  "total_failed": 0,
+  "knowledge_bases": [
+    {
+      "kb_name": "project-alpha",
+      "knowledge_id": "kb_abc123",
+      "kb_created": false,
+      "discovered": 2,
+      "imported": 1,
+      "linked": 1,
+      "processed": 1,
+      "skipped": 1,
+      "failed": 0,
+      "files": [...]
+    }
+  ]
+}
 ```
 
-Set ownership to the user that will clone repositories and run the scheduled tasks:
+## Access control
+
+- **Admin only.** The tool rejects calls from any user whose role is not `admin`.
+- **Allow-list path security.** The `drop_folder` is resolved and checked against `allowed_base_dirs` before any file I/O is performed, preventing path traversal.
+
+## Limitations
+
+- **Local filesystem only.** Not compatible with S3, GCS, or Azure Blob storage backends.
+- The drop folder must be accessible to the Open WebUI server process.
+- Deduplication is hash-based: a file that moves to a different path but whose content is unchanged will be skipped. A renamed file with the same content is treated as the same file.
+
+## Automated sync with scheduled tasks
+
+A common pattern is to keep each subfolder as a git repository, pull the latest commits on a schedule, then trigger the import so Open WebUI's knowledge bases stay in sync automatically.
+
+### The sync script
+
+[`owui-sync.sh`](owui-sync.sh) is included in this repo. Copy it to the server and make it executable:
 
 ```bash
-sudo chown -R <your-user>:<your-group> data logs markdown-repos
-chmod 775 data logs markdown-repos
+cp owui-sync.sh /usr/local/bin/owui-sync.sh
+chmod +x /usr/local/bin/owui-sync.sh
 ```
 
-If your scheduled task runs as `root`, make sure `root` still has read/write access to `data/` and `logs/`. Git access to `markdown-repos/` is controlled separately via the `safe.directory` setting shown above.
+## **Required environment variables**
 
-## Configuration
-
-Copy `.env.example` (or create `.env`) and populate the following variables:
-
-| Variable | Description | Default |
-| -- | -- | -- |
-| `WEBUI_URL` | Base URL of your Open WebUI instance | `http://localhost:3000` |
-| `API_KEY` | Bearer token for the Open WebUI API | *(required)* |
-| `STATE_FILE` | Path inside the container where sync state is persisted | `/data/sync_state.json` |
-| `RETRY_DELAY_SECONDS` | Delay between retry attempts for transient API errors | `60` |
-| `MAX_RETRIES` | Maximum retry attempts per API call | `5` |
-
-> **Security note:** The `.env` file contains your API key and is excluded from version control via `.gitignore`. Never commit it.
-
-The repository source path is fixed in the container at `/markdown-repos`, which is bind-mounted from `./markdown-repos` on the host.
-
-## Logging
-
-Each run writes logs to `./logs/YYYY-MM-DD_Container.log` on the host via the `/logs` bind mount. Because the container is started with `--rm`, this host-mounted folder is what preserves logs between runs.
-
-Before the container exits, it removes log files older than 14 days and keeps the current day's log file.
-
-## Running
-
-### Initial build
-
-Build the image once before scheduling:
-
-```bash
-docker compose build
-```
-
-### On-demand sync
-
-Use `--rm` so the container is automatically removed after each run, keeping things clean:
-
-```bash
-docker compose run --rm openwebui-markdown-sync
-```
-
-This writes application logs to `./logs/` automatically. Additional shell redirection is optional and is only needed if you also want to capture scheduler-level output.
-
-### Scheduled syncing on Synology
-
-Set up a single **Synology Task Scheduler** task (Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script). Run it under a user with Docker access (e.g. your admin account).
-
-| Setting | Value |
+| Variable | Description |
 | -- | -- |
-| **Task name** | `openwebui-markdown-sync` |
-| **Schedule** | e.g. daily at 02:00 |
-| **User** | Your Synology user |
+| `HOST_DROP` | Path to the drop folder on the **host** (NAS/server). Used by the git pull loop. |
+| `CONTAINER_DROP` | Path to the same drop folder as seen **inside the container**. Sent in the API call and must match `allowed_base_dirs` in the Valve. |
+| `OWUI_URL` | Base URL of your Open WebUI instance. |
+| `OWUI_API_KEY` | API key for an admin account (`Settings → Account → API Keys`). |
+| `OWUI_MODEL` | Any model that has the Local Directory Import tool enabled. |
+| `OWUI_TOOL_ID` | The tool's ID as shown in **Workspace → Tools**. |
 
-**Script:**
+### Cron (Linux)
 
-```bash
-#!/bin/bash
-
-# 1. Skip if a sync is already running
-if [ "$(docker ps -q --filter "name=openwebui-markdown-sync")" ]; then
-    echo "The container is already running. Exiting."
-    exit 1
-fi
-
-# 2. Pull the latest docs from every cloned repository
-for repo in /path/to/openwebui-markdown-sync/markdown-repos/*/; do
-    echo "Updating $repo..."
-    git -C "$repo" pull --ff-only
-done
-
-# 3. Run the sync container (the for loop above must finish before this line)
-cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync
-```
-
-The container will append to `./logs/YYYY-MM-DD_Container.log` for that day and remove logs older than 14 days automatically.
-
-### Scheduled syncing on Linux
-
-Save the script below (e.g. to `/usr/local/bin/openwebui-markdown-sync.sh`), make it executable (`chmod +x`), then add a single cron entry via `crontab -e`:
+Edit the crontab for the user that has read access to the drop folder:
 
 ```bash
-#!/bin/bash
-
-# 1. Skip if a sync is already running
-if [ "$(docker ps -q --filter "name=openwebui-markdown-sync")" ]; then
-    echo "The container is already running. Exiting."
-    exit 1
-fi
-
-# 2. Pull the latest docs from every cloned repository
-for repo in /path/to/openwebui-markdown-sync/markdown-repos/*/; do
-    echo "Updating $repo..."
-    git -C "$repo" pull --ff-only
-done
-
-# 3. Run the sync container (the for loop above must finish before this line)
-cd /path/to/openwebui-markdown-sync && docker compose run --rm openwebui-markdown-sync
+crontab -e
 ```
+
+Run every night at 02:00:
 
 ```cron
-# Run daily at 02:00
-0 2 * * * /usr/local/bin/openwebui-markdown-sync.sh
+0 2 * * * HOST_DROP=/host/path/to/drop CONTAINER_DROP=/app/backend/data/drop OWUI_URL=http://your-owui-host:3000 OWUI_API_KEY=sk-... OWUI_MODEL=gpt-4o OWUI_TOOL_ID=local_directory_import /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
 ```
 
-Application logs are already persisted to `./logs/YYYY-MM-DD_Container.log`, so cron redirection is optional.
+Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
 
-## State persistence
+```cron
+0 2 * * * . /etc/owui-sync.env && /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
+```
 
-Sync state is written to `./data/sync_state.json` on the host (mounted at `/data` inside the container). This file records the MD5 hash of every previously uploaded file so incremental runs are fast. Do not delete it unless you want a full re-upload on the next run.
+### Synology NAS Task Scheduler
 
-## Project structure
+1. Open **DSM → Control Panel → Task Scheduler**.
+2. Click **Create → Scheduled Task → User-defined script**.
+3. Fill in the **General** tab:
+   - Task name: `OWUI Knowledge Sync`
+   - User: an account with read access to the drop folder
+4. Fill in the **Schedule** tab to your preferred recurrence (e.g. daily at 02:00).
+5. On the **Task Settings** tab, paste the following into **Run command**:
+
+    ```bash
+    export HOST_DROP=/host/path/to/drop
+    export CONTAINER_DROP=/app/backend/data/drop
+    export OWUI_URL=http://your-owui-host:3000
+    export OWUI_API_KEY=sk-...
+    export OWUI_MODEL=gpt-4o
+    export OWUI_TOOL_ID=local_directory_import
+    bash /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
+    ```
+
+6. Click **OK**. You can immediately test it with **Action → Run**.
+
+> **Synology note:** If Open WebUI runs in a Docker container on the same NAS, use the container's bridge IP (e.g. `http://172.17.0.1:3000`) or the NAS LAN IP rather than `localhost`, since the script runs outside the container network.
+
+---
+
+## Development
+
+Run the unit tests (no live Open WebUI instance required):
 
 ```bash
-compose.yaml          # Docker Compose service definition (not committed)
-compose.yaml.example  # Generic template to copy from
-app/
-  Program.cs          # All sync logic
-  app.csproj          # .NET 10 project file
-  Dockerfile          # Multi-stage build (SDK → runtime)
-markdown-repos/       # Cloned documentation repositories (not committed)
-data/                 # Created at runtime; holds sync_state.json
-logs/                 # Persistent container logs (not committed)
-.env                  # Local config (not committed)
-.env.example          # Template for .env
+pytest test_local_directory_import.py
 ```
+
+## License
+
+MIT
