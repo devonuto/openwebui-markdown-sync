@@ -6,7 +6,7 @@ An [Open WebUI Tool plugin](https://docs.openwebui.com/features/extensibility/pl
 
 Point the tool at a drop folder on the server's local filesystem. Each **immediate subfolder** of that folder is treated as a target Knowledge Base — the KB is created automatically if it does not already exist. All files found recursively inside each subfolder are then:
 
-1. Hashed with SHA-256 — if a file with the same hash already exists in the database it is skipped
+1. Read and hashed with SHA-256 (the source file is never modified or renamed) — if a matching hash already exists in the database the file is skipped
 2. Copied into Open WebUI's upload directory (`UPLOAD_DIR`)
 3. Registered as a file record in the database (with its SHA-256 hash stored)
 4. Linked to the corresponding Knowledge Base
