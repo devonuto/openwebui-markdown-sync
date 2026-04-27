@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any
 
 
-def _read_json(path: pathlib.Path) -> dict[str, Any]:
+def _read_json(path: pathlib.Path) -> Any:
     if not path.exists():
         return {}
     try:
@@ -48,7 +48,14 @@ def _sync_once(
         raise FileNotFoundError(f"Source file not found: {src}")
 
     src_text = src.read_text(encoding="utf-8")
-    existing = _read_json(json_path)
+    existing_raw = _read_json(json_path)
+    if isinstance(existing_raw, list):
+        existing = existing_raw[0] if existing_raw and isinstance(existing_raw[0], dict) else {}
+    elif isinstance(existing_raw, dict):
+        existing = existing_raw
+    else:
+        existing = {}
+
     existing_meta = existing.get("meta") if isinstance(existing.get("meta"), dict) else {}
 
     payload: dict[str, Any] = dict(existing)

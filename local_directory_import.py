@@ -15,6 +15,7 @@ Note: local filesystem only — not compatible with S3/GCS/Azure storage backend
 __version__ = '0.1.0'
 
 import hashlib
+import importlib
 import json
 import logging
 import mimetypes
@@ -27,12 +28,98 @@ from fastapi import Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from open_webui.config import UPLOAD_DIR
-from open_webui.internal.db import get_async_db
-from open_webui.models.files import File, FileForm, Files
-from open_webui.models.knowledge import Knowledge, KnowledgeForm, Knowledges
-from open_webui.models.users import UserModel
-from open_webui.routers.retrieval import ProcessFileForm, process_file
+UPLOAD_DIR = None
+get_async_db = None
+File = None
+FileForm = None
+Files = None
+Knowledge = None
+KnowledgeForm = None
+Knowledges = None
+UserModel = None
+ProcessFileForm = None
+process_file = None
+
+
+def _ensure_openwebui_imports() -> None:
+    """Resolve Open WebUI symbols lazily for wider version compatibility."""
+    global UPLOAD_DIR
+    global get_async_db
+    global File
+    global FileForm
+    global Files
+    global Knowledge
+    global KnowledgeForm
+    global Knowledges
+    global UserModel
+    global ProcessFileForm
+    global process_file
+
+    if all(
+        sym is not None
+        for sym in (
+            UPLOAD_DIR,
+            get_async_db,
+            File,
+            FileForm,
+            Files,
+            Knowledge,
+            KnowledgeForm,
+            Knowledges,
+            UserModel,
+            ProcessFileForm,
+            process_file,
+        )
+    ):
+        return
+
+    candidates = (
+        {
+            'config': 'open_webui.config',
+            'db': 'open_webui.internal.db',
+            'files': 'open_webui.models.files',
+            'knowledge': 'open_webui.models.knowledge',
+            'users': 'open_webui.models.users',
+            'retrieval': 'open_webui.routers.retrieval',
+        },
+        {
+            'config': 'apps.webui.config',
+            'db': 'apps.webui.internal.db',
+            'files': 'apps.webui.models.files',
+            'knowledge': 'apps.webui.models.knowledge',
+            'users': 'apps.webui.models.users',
+            'retrieval': 'apps.webui.routers.retrieval',
+        },
+    )
+
+    last_exc = None
+    for modules in candidates:
+        try:
+            config_mod = importlib.import_module(modules['config'])
+            db_mod = importlib.import_module(modules['db'])
+            files_mod = importlib.import_module(modules['files'])
+            knowledge_mod = importlib.import_module(modules['knowledge'])
+            users_mod = importlib.import_module(modules['users'])
+            retrieval_mod = importlib.import_module(modules['retrieval'])
+
+            UPLOAD_DIR = getattr(config_mod, 'UPLOAD_DIR')
+            get_async_db = getattr(db_mod, 'get_async_db')
+            File = getattr(files_mod, 'File')
+            FileForm = getattr(files_mod, 'FileForm')
+            Files = getattr(files_mod, 'Files')
+            Knowledge = getattr(knowledge_mod, 'Knowledge')
+            KnowledgeForm = getattr(knowledge_mod, 'KnowledgeForm')
+            Knowledges = getattr(knowledge_mod, 'Knowledges')
+            UserModel = getattr(users_mod, 'UserModel')
+            ProcessFileForm = getattr(retrieval_mod, 'ProcessFileForm')
+            process_file = getattr(retrieval_mod, 'process_file')
+            return
+        except Exception as exc:
+            last_exc = exc
+
+    raise ImportError(
+        'Unable to resolve Open WebUI tool imports for this environment.'
+    ) from last_exc
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +208,7 @@ def _hash_file(path: pathlib.Path, chunk_size: int = 65536) -> str:
 
 async def _find_file_by_hash(file_hash: str, db) -> 'File | None':
     """Return the first File record whose hash matches *file_hash*, or None."""
+    _ensure_openwebui_imports()
     result = await db.execute(
         select(File).where(File.hash == file_hash).limit(1)
     )
@@ -149,6 +237,7 @@ def _discover_files(subfolder: pathlib.Path) -> list:
 
 def _copy_file_to_upload_dir(src: pathlib.Path, file_id: str, filename: str) -> pathlib.Path:
     """Copy *src* into UPLOAD_DIR with a prefixed name and return the destination path."""
+    _ensure_openwebui_imports()
     dest = pathlib.Path(UPLOAD_DIR) / f'{file_id}_{filename}'
     shutil.copy(src, dest)
     return dest
@@ -163,6 +252,7 @@ async def _insert_file_record(
     file_hash: str,
 ) -> None:
     """Create a File DB record for the staged file."""
+    _ensure_openwebui_imports()
     content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
     size = dest_path.stat().st_size
     await Files.insert_new_file(
@@ -194,6 +284,7 @@ async def _find_or_create_kb(kb_name: str, user_id: str, db) -> tuple:
     Returns ``(knowledge_id, kb_created)`` where *kb_created* is ``True`` when a
     new knowledge base was created during this call.
     """
+    _ensure_openwebui_imports()
     result = await db.execute(
         select(Knowledge).where(Knowledge.name == kb_name).limit(1)
     )
@@ -213,6 +304,7 @@ async def _find_or_create_kb(kb_name: str, user_id: str, db) -> tuple:
 
 async def _link_file_to_kb(knowledge_id: str, file_id: str, user_id: str, db) -> None:
     """Link an existing file record to a knowledge base."""
+    _ensure_openwebui_imports()
     await Knowledges.add_file_to_knowledge_by_id(
         knowledge_id=knowledge_id,
         file_id=file_id,
@@ -234,6 +326,7 @@ async def _vectorize_file(
     db,
 ) -> None:
     """Vectorize a file into the KB's collection via the retrieval pipeline."""
+    _ensure_openwebui_imports()
     await process_file(
         request,
         ProcessFileForm(file_id=file_id, collection_name=knowledge_id),
@@ -278,6 +371,8 @@ class Tools:
         :param drop_folder: Absolute path to the root folder containing repo subfolders.
         :return: JSON string containing an ImportSummary with per-KB breakdowns.
         """
+        _ensure_openwebui_imports()
+
         # 1. Admin role guard — must be the first check
         if __user__.get('role') != 'admin':
             return json.dumps(
