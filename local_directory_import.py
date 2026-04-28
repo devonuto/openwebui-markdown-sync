@@ -323,7 +323,7 @@ def _discover_files(subfolder: pathlib.Path) -> list:
             and not any(_is_hidden_dir(part) for part in p.parts[base_parts:])
         ]
     )
-    log.info(
+    log.warning(
         'local_import discover subfolder=%s rglob_entries=%d total_files=%d '
         'hidden_excluded=%d unsupported_excluded=%d will_import=%d',
         subfolder,
@@ -805,7 +805,7 @@ class Tools:
                 # 5. Discover and process files within this subfolder
                 files = _discover_files(subfolder)
                 kb_summary.discovered = len(files)
-                log.info(
+                log.warning(
                     'local_import kb=%s knowledge_id=%s kb_created=%s discovered=%d',
                     kb_name,
                     knowledge_id,
