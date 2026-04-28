@@ -14,6 +14,7 @@ Note: local filesystem only — not compatible with S3/GCS/Azure storage backend
 
 __version__ = '0.1.0'
 
+import asyncio
 import hashlib
 import inspect
 import importlib
@@ -607,26 +608,23 @@ class Tools:
                 'Note: local filesystem only — not compatible with S3/GCS/Azure storage backends.'
             ),
         )
+        detached_import: bool = Field(
+            default=False,
+            description=(
+                'When true, schedule import work in the background and return '
+                'immediately. Progress/errors are written to Open WebUI logs.'
+            ),
+        )
 
     def __init__(self):
         self.valves = self.Valves()
 
-    async def import_local_directory(
+    async def _run_import_local_directory(
         self,
-        __user__: dict = {},
-        __request__: Request = None,
+        __user__: dict,
+        __request__: Request,
     ) -> str:
-        """
-        Import all files from the configured drop folder into knowledge bases.
-
-        The drop folder path is set by the admin in the Valves configuration
-        (drop_folder). Each immediate subfolder is mapped to a knowledge
-        base with the same name (created automatically if it does not exist).
-        All files within each subfolder (recursively) are copied to the upload
-        directory, registered in the database, linked to the KB, and vectorized.
-
-        :return: JSON string containing an ImportSummary with per-KB breakdowns.
-        """
+        """Execute the full import pipeline and return JSON summary."""
         overall_start = time.perf_counter()
         drop_folder = self.valves.drop_folder
         if not drop_folder:
@@ -923,3 +921,41 @@ class Tools:
         )
 
         return json.dumps(asdict(summary))
+
+    async def _run_import_local_directory_detached(
+        self,
+        __user__: dict,
+        __request__: Request,
+    ) -> None:
+        """Execute import in a background task and log outcome."""
+        try:
+            result = await self._run_import_local_directory(__user__, __request__)
+            log.info('local_import detached_completed summary=%s', result)
+        except Exception:
+            log.exception('local_import detached_failed')
+
+    async def import_local_directory(
+        self,
+        __user__: dict = {},
+        __request__: Request = None,
+    ) -> str:
+        """
+        Import all files from the configured drop folder into knowledge bases.
+
+        The drop folder path is set by the admin in the Valves configuration
+        (drop_folder). Each immediate subfolder is mapped to a knowledge
+        base with the same name (created automatically if it does not exist).
+        All files within each subfolder (recursively) are copied to the upload
+        directory, registered in the database, linked to the KB, and vectorized.
+
+        :return: JSON string containing an ImportSummary with per-KB breakdowns.
+        """
+        if getattr(self.valves, 'detached_import', False) is True:
+            # Copy user payload to avoid accidental mutation after dispatch.
+            user_copy = dict(__user__) if isinstance(__user__, dict) else __user__
+            asyncio.create_task(
+                self._run_import_local_directory_detached(user_copy, __request__)
+            )
+            return json.dumps({'status': 'dispatched'})
+
+        return await self._run_import_local_directory(__user__, __request__)

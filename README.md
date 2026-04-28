@@ -51,6 +51,7 @@ If import succeeds but you still do not see the tool:
 | Valve | Type | Default | Description |
 | -- | -- | -- | -- |
 | `drop_folder` | `str` | `"/app/backend/data/drop"` | Absolute path to the drop folder to import from. Each immediate subfolder is mapped to a knowledge base. |
+| `detached_import` | `bool` | `false` | When `true`, queues import work in the background, returns immediately with a small dispatch response, and writes progress/errors to Open WebUI logs. |
 
 > **Note:** The default matches the standard Open WebUI Docker volume mount path. Adjust if your setup differs.
 
@@ -62,7 +63,11 @@ The tool exposes a single function that the LLM (or a user with admin rights) ca
 import_local_directory() → str (JSON)
 ```
 
-No parameters — the drop folder path is set by the admin in the `drop_folder` Valve.
+No parameters — behavior is controlled by Valves.
+
+- `drop_folder`: source folder to ingest.
+- `detached_import=false` (default): chat waits for completion and receives the full JSON summary.
+- `detached_import=true`: chat returns immediately with a dispatch acknowledgement; follow progress in Open WebUI server logs.
 
 ### **Example prompt**
 
