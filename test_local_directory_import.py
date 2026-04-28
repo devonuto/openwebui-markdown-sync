@@ -64,6 +64,8 @@ ImportSummary = _plugin_module.ImportSummary
 KBImportSummary = _plugin_module.KBImportSummary
 ImportFileResult = _plugin_module.ImportFileResult
 Tools = _plugin_module.Tools
+_vectorize_file = _plugin_module._vectorize_file
+_INLINE_CONTENT_EXTENSIONS = _plugin_module._INLINE_CONTENT_EXTENSIONS
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +224,87 @@ class TestFindOrCreateKb:
 
         result = await _find_or_create_kb('my-kb', 'user-1', mock_db)
         assert result == ('existing-id', False)
+
+
+# ---------------------------------------------------------------------------
+# _vectorize_file — inline content for YAML/JSON
+# ---------------------------------------------------------------------------
+
+
+class TestVectorizeFileInlineContent:
+    @pytest.mark.asyncio
+    async def test_yaml_content_passed_inline(self, tmp_path):
+        """ProcessFileForm receives 'content' for .yml files."""
+        yaml_file = tmp_path / 'toc.yml'
+        yaml_file.write_text('- name: Learn\n  href: /')
+
+        captured = {}
+
+        def fake_process_form(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        mock_form_cls = MagicMock(side_effect=fake_process_form)
+
+        with patch.object(_plugin_module, 'ProcessFileForm', mock_form_cls), \
+             patch.object(_plugin_module, 'process_file', new=AsyncMock(return_value=None)):
+            await _vectorize_file(
+                MagicMock(), 'fid', 'kid', MagicMock(), MagicMock(),
+                file_path=yaml_file,
+            )
+
+        assert 'content' in captured
+        assert '- name: Learn' in captured['content']
+
+    @pytest.mark.asyncio
+    async def test_json_content_passed_inline(self, tmp_path):
+        """ProcessFileForm receives 'content' for .json files."""
+        json_file = tmp_path / 'config.json'
+        json_file.write_text('{"key": "value"}')
+
+        captured = {}
+
+        def fake_process_form(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        mock_form_cls = MagicMock(side_effect=fake_process_form)
+
+        with patch.object(_plugin_module, 'ProcessFileForm', mock_form_cls), \
+             patch.object(_plugin_module, 'process_file', new=AsyncMock(return_value=None)):
+            await _vectorize_file(
+                MagicMock(), 'fid', 'kid', MagicMock(), MagicMock(),
+                file_path=json_file,
+            )
+
+        assert captured.get('content') == '{"key": "value"}'
+
+    @pytest.mark.asyncio
+    async def test_md_file_no_inline_content(self, tmp_path):
+        """ProcessFileForm is not given 'content' for .md files (pipeline handles it)."""
+        md_file = tmp_path / 'readme.md'
+        md_file.write_text('# Hello')
+
+        captured = {}
+
+        def fake_process_form(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        mock_form_cls = MagicMock(side_effect=fake_process_form)
+
+        with patch.object(_plugin_module, 'ProcessFileForm', mock_form_cls), \
+             patch.object(_plugin_module, 'process_file', new=AsyncMock(return_value=None)):
+            await _vectorize_file(
+                MagicMock(), 'fid', 'kid', MagicMock(), MagicMock(),
+                file_path=md_file,
+            )
+
+        assert 'content' not in captured
+
+    def test_inline_content_extensions_set(self):
+        """The inline-content extension set includes json, yml, yaml."""
+        assert _INLINE_CONTENT_EXTENSIONS == {'.json', '.yml', '.yaml'}
 
 
 class TestFindFileByHash:

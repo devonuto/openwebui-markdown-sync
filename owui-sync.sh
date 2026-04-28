@@ -11,7 +11,7 @@ HOST_DROP="${HOST_DROP:-/host/path/to/drop}"
 CONTAINER_DROP="${CONTAINER_DROP:-/app/backend/data/drop}"
 OWUI_URL="${OWUI_URL:-http://localhost:3000}"
 OWUI_API_KEY="${OWUI_API_KEY:-}"       # Set via environment or replace here
-OWUI_MODEL="${OWUI_MODEL:-gpt-4o}"    # Any model that has the tool enabled
+OWUI_MODEL="${OWUI_MODEL:-gpt-5.4-nano}"    # Any model that has the tool enabled
 OWUI_TOOL_ID="${OWUI_TOOL_ID:-local_directory_import}"  # Tool ID from Workspace → Tools
 
 # ── 1. Git pull every immediate subfolder (runs on the host) ─────────────────

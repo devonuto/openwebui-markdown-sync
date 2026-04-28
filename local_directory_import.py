@@ -494,20 +494,50 @@ async def _link_file_to_kb(knowledge_id: str, file_id: str, user_id: str, db) ->
 # ---------------------------------------------------------------------------
 
 
+# File types whose text content must be supplied inline because Open WebUI's
+# retrieval pipeline has no native loader for them.
+_INLINE_CONTENT_EXTENSIONS = {'.json', '.yml', '.yaml'}
+
+
 async def _vectorize_file(
     request: Request,
     file_id: str,
     knowledge_id: str,
     user,
     db,
+    file_path: pathlib.Path | None = None,
 ) -> None:
-    """Vectorize a file into the KB's collection via the retrieval pipeline."""
+    """Vectorize a file into the KB's collection via the retrieval pipeline.
+
+    For formats without a native Open WebUI loader (JSON, YAML), the file text
+    is read here and passed as *content* on the form so the vectorizer does not
+    attempt to extract it from disk and return empty content.
+    """
     _ensure_openwebui_imports()
-    form = (
-        ProcessFileForm(file_id=file_id, collection_name=knowledge_id)
-        if ProcessFileForm is not None
-        else SimpleNamespace(file_id=file_id, collection_name=knowledge_id, content=None)
-    )
+
+    inline_content = None
+    if file_path is not None and file_path.suffix.lower() in _INLINE_CONTENT_EXTENSIONS:
+        try:
+            inline_content = file_path.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
+    if ProcessFileForm is not None:
+        form_kwargs = {'file_id': file_id, 'collection_name': knowledge_id}
+        if inline_content is not None:
+            form_kwargs['content'] = inline_content
+        try:
+            form = ProcessFileForm(**form_kwargs)
+        except TypeError:
+            # Older builds may not accept 'content'; fall back without it.
+            form = ProcessFileForm(file_id=file_id, collection_name=knowledge_id)
+    else:
+        form = SimpleNamespace(
+            file_id=file_id,
+            collection_name=knowledge_id,
+            content=inline_content,
+        )
+
     await _maybe_await(
         process_file(
             request,
@@ -817,7 +847,8 @@ class Tools:
                     # Vectorize — failures are non-fatal (FR-017)
                     try:
                         await _vectorize_file(
-                            __request__, file_id, knowledge_id, user, db
+                            __request__, file_id, knowledge_id, user, db,
+                            file_path=file_path,
                         )
                         kb_summary.processed += 1
                         status = 'processed'
