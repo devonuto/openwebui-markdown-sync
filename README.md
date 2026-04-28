@@ -171,7 +171,7 @@ Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
     export CONTAINER_DROP=/app/backend/data/drop
     export OWUI_URL=http://your-owui-host:3000
     export OWUI_API_KEY=sk-...
-    export OWUI_MODEL=gpt-5.4-nano
+    export OWUI_MODEL=gpt-4o
     export OWUI_TOOL_ID=local_directory_import
     bash /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
     ```
