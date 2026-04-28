@@ -12,7 +12,7 @@ Returns a JSON summary with per-KB breakdowns.
 Note: local filesystem only — not compatible with S3/GCS/Azure storage backends.
 """
 
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 import asyncio
 import hashlib

@@ -26,13 +26,18 @@ done
 #    The system prompt + terse user message keeps token usage to a minimum:
 #    the model should call the tool immediately and reply with only the JSON.
 echo "[sync] Triggering Open WebUI import for $CONTAINER_DROP"
-curl -s -X POST "$OWUI_URL/api/chat/completions" \
+
+# stream=true is required — without it Open WebUI returns the raw model response
+# and never executes the tool server-side. With streaming the full tool-call loop
+# runs: model → tool execution → final reply.
+RESPONSE=$(curl -s -X POST "$OWUI_URL/api/chat/completions" \
     -H "Authorization: Bearer $OWUI_API_KEY" \
     -H "Content-Type: application/json" \
     -d @- <<JSON
 {
   "model": "$OWUI_MODEL",
   "tool_ids": ["$OWUI_TOOL_ID"],
+  "stream": true,
   "messages": [
     {
       "role": "system",
@@ -45,5 +50,30 @@ curl -s -X POST "$OWUI_URL/api/chat/completions" \
   ]
 }
 JSON
+)
 
+# Extract the final assistant content from the SSE stream
+# Each chunk is: data: {"choices":[{"delta":{"content":"..."}}]}
+# We concatenate all content deltas to reconstruct the full reply.
+FINAL=$(echo "$RESPONSE" \
+    | grep '^data: ' \
+    | grep -v '^data: \[DONE\]' \
+    | sed 's/^data: //' \
+    | python3 -c "
+import sys, json
+buf = ''
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+        delta = obj.get('choices', [{}])[0].get('delta', {})
+        buf += delta.get('content', '') or ''
+    except Exception:
+        pass
+print(buf)
+" 2>/dev/null || echo "(could not parse stream)")
+
+echo "[sync] Result: $FINAL"
 echo "[sync] Done."
