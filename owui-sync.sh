@@ -23,6 +23,8 @@ done
 
 # ── 2. Trigger the Open WebUI import tool via the chat completions API ────────
 #    The plugin runs inside the container, so we pass CONTAINER_DROP here.
+#    The system prompt + terse user message keeps token usage to a minimum:
+#    the model should call the tool immediately and reply with only the JSON.
 echo "[sync] Triggering Open WebUI import for $CONTAINER_DROP"
 curl -s -X POST "$OWUI_URL/api/chat/completions" \
     -H "Authorization: Bearer $OWUI_API_KEY" \
@@ -33,8 +35,12 @@ curl -s -X POST "$OWUI_URL/api/chat/completions" \
   "tool_ids": ["$OWUI_TOOL_ID"],
   "messages": [
     {
+      "role": "system",
+      "content": "You are an automation agent. When asked to import, call import_local_directory immediately and reply with only the raw JSON result. No explanation."
+    },
+    {
       "role": "user",
-      "content": "Import the documents in $CONTAINER_DROP into the knowledge bases."
+      "content": "import"
     }
   ]
 }
