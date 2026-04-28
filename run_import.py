@@ -12,6 +12,7 @@ The drop_folder argument defaults to /app/backend/data/drop.
 
 import asyncio
 import collections.abc
+import datetime as dt
 import inspect
 import logging
 import sys
@@ -121,6 +122,49 @@ def _is_admin_user(user) -> bool:
     return False
 
 
+def _build_user_payload(user) -> dict:
+    """Build a dict payload compatible with Open WebUI UserModel validation."""
+    payload = {}
+
+    if isinstance(user, dict):
+        payload = dict(user)
+    elif hasattr(user, 'model_dump'):
+        try:
+            payload = user.model_dump()  # Pydantic v2 models
+        except Exception:
+            payload = {}
+    elif hasattr(user, 'dict'):
+        try:
+            payload = user.dict()  # Pydantic v1 models
+        except Exception:
+            payload = {}
+    else:
+        try:
+            payload = {
+                k: v for k, v in vars(user).items()
+                if not k.startswith('_')
+            }
+        except Exception:
+            payload = {}
+
+    # Ensure core fields exist and are aligned with admin account.
+    payload['id'] = _get_field(user, 'id', payload.get('id'))
+    payload['email'] = _get_field(user, 'email', payload.get('email', ''))
+    payload['name'] = _get_field(user, 'name', payload.get('name', 'admin'))
+    payload['role'] = 'admin'
+
+    # Open WebUI UserModel in some versions requires these datetime fields.
+    now = dt.datetime.now(dt.timezone.utc)
+    if payload.get('created_at') is None:
+        payload['created_at'] = _get_field(user, 'created_at', now)
+    if payload.get('updated_at') is None:
+        payload['updated_at'] = _get_field(user, 'updated_at', now)
+    if payload.get('last_active_at') is None:
+        payload['last_active_at'] = _get_field(user, 'last_active_at', now)
+
+    return payload
+
+
 async def main() -> None:
     # ── 1. Find the first admin user ─────────────────────────────────────────
     # Import only the users model to avoid triggering the full app startup.
@@ -154,12 +198,7 @@ async def main() -> None:
     if admin is None:
         sys.exit('ERROR: no admin user found in the database')
 
-    user_dict = {
-        'id': _get_field(admin, 'id'),
-        'email': _get_field(admin, 'email', ''),
-        'name': _get_field(admin, 'name', 'admin'),
-        'role': 'admin',
-    }
+    user_dict = _build_user_payload(admin)
     if not user_dict['id']:
         sys.exit('ERROR: admin user resolved but id is missing')
     log.info('run_import admin_id=%s email=%s', user_dict['id'], user_dict['email'])
