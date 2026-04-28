@@ -30,10 +30,7 @@ echo "[sync] Triggering Open WebUI import for $CONTAINER_DROP"
 # stream=true is required — without it Open WebUI returns the raw model response
 # and never executes the tool server-side. With streaming the full tool-call loop
 # runs: model → tool execution → final reply.
-RESPONSE=$(curl -s -X POST "$OWUI_URL/api/chat/completions" \
-    -H "Authorization: Bearer $OWUI_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d @- <<JSON
+PAYLOAD=$(cat <<JSON
 {
   "model": "$OWUI_MODEL",
   "tool_ids": ["$OWUI_TOOL_ID"],
@@ -52,6 +49,24 @@ RESPONSE=$(curl -s -X POST "$OWUI_URL/api/chat/completions" \
 JSON
 )
 
+echo "[sync] POST $OWUI_URL/api/chat/completions model=$OWUI_MODEL tool_ids=[$OWUI_TOOL_ID]"
+
+RESPONSE=$(curl -f -S -X POST "$OWUI_URL/api/chat/completions" \
+    -H "Authorization: Bearer $OWUI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD")
+
+CURL_EXIT=$?
+if [ $CURL_EXIT -ne 0 ]; then
+    echo "[sync] ERROR: curl failed (exit $CURL_EXIT)"
+    echo "[sync] Raw response: $RESPONSE"
+    exit 1
+fi
+
+echo "[sync] Raw stream (first 2000 chars):"
+echo "${RESPONSE:0:2000}"
+echo "---"
+
 # Extract the final assistant content from the SSE stream
 # Each chunk is: data: {"choices":[{"delta":{"content":"..."}}]}
 # We concatenate all content deltas to reconstruct the full reply.
@@ -62,6 +77,7 @@ FINAL=$(echo "$RESPONSE" \
     | python3 -c "
 import sys, json
 buf = ''
+errors = []
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -70,10 +86,12 @@ for line in sys.stdin:
         obj = json.loads(line)
         delta = obj.get('choices', [{}])[0].get('delta', {})
         buf += delta.get('content', '') or ''
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(str(e))
+if errors:
+    print('(parse errors:', errors[:3], ')', file=sys.stderr)
 print(buf)
-" 2>/dev/null || echo "(could not parse stream)")
+")
 
 echo "[sync] Result: $FINAL"
 echo "[sync] Done."
