@@ -144,17 +144,21 @@ put the file here on host:
 Then execute it in the container as:
 
 ```bash
-docker exec open-webui python3 /app/backend/data/scripts/run_import.py /app/backend/data/drop
+docker exec open-webui python3 /app/backend/data/scripts/run_import.py
 ```
+
+`run_import.py` defaults to `/app/backend/data/drop` when no path argument is provided.
+Pass an explicit path only if you need to override that default.
 
 ## Variables for scheduled commands
 
 | Variable | Description |
 | -- | -- |
-| `HOST_DROP` | Path to the drop folder on the **host** (NAS/server). Used by the git pull loop. |
-| `CONTAINER_DROP` | Path to the same drop folder as seen **inside the container**. Must match the `drop_folder` Valve value configured in Open WebUI. |
+| `HOST_DROP` | Path to the drop folder on the **host** (NAS/server). Used by the git pull loop (example: `/volume1/docker/open-webui/drop/`). |
+| `CONTAINER_DROP` | Optional override path to pass into `run_import.py`. If omitted, the script uses `/app/backend/data/drop`. |
 | `OWUI_CONTAINER` | Docker container name or ID for Open WebUI (default: `open-webui`). |
 | `RUN_IMPORT_PATH` | Full path to `run_import.py` **inside the container** (for the mapping above: `/app/backend/data/scripts/run_import.py`). |
+| `LOG_FILE` | Writable host log file path for scheduler output (example: `/volume1/docker/open-webui/logs/owui-sync.log`). |
 
 ### Cron (Linux)
 
@@ -167,13 +171,13 @@ crontab -e
 Run every night at 02:00:
 
 ```cron
-0 2 * * * HOST_DROP=/host/path/to/drop CONTAINER_DROP=/app/backend/data/drop OWUI_CONTAINER=open-webui RUN_IMPORT_PATH=/app/backend/data/scripts/run_import.py bash -lc 'for d in "$HOST_DROP"/*/; do [ -d "$d/.git" ] && git -C "$d" pull --ff-only; done; docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" "$CONTAINER_DROP"' >> /var/log/owui-sync.log 2>&1
+0 2 * * * HOST_DROP=/host/path/to/drop OWUI_CONTAINER=open-webui RUN_IMPORT_PATH=/app/backend/data/scripts/run_import.py LOG_FILE=/volume2/docker/open-webui/logs/owui-sync.log bash -lc 'mkdir -p "$(dirname "$LOG_FILE")"; for d in "$HOST_DROP"/*/; do [ -d "$d/.git" ] && git -C "$d" pull --ff-only; done; docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" >> "$LOG_FILE" 2>&1'
 ```
 
 Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
 
 ```cron
-0 2 * * * . /etc/owui-sync.env && bash -lc 'for d in "$HOST_DROP"/*/; do [ -d "$d/.git" ] && git -C "$d" pull --ff-only; done; docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" "$CONTAINER_DROP"' >> /var/log/owui-sync.log 2>&1
+0 2 * * * . /etc/owui-sync.env && bash -lc 'mkdir -p "$(dirname "$LOG_FILE")"; for d in "$HOST_DROP"/*/; do [ -d "$d/.git" ] && git -C "$d" pull --ff-only; done; docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" >> "$LOG_FILE" 2>&1'
 ```
 
 ### Synology NAS Task Scheduler
@@ -188,13 +192,14 @@ Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
 
     ```bash
     export HOST_DROP=/host/path/to/drop
-    export CONTAINER_DROP=/app/backend/data/drop
     export OWUI_CONTAINER=open-webui
     export RUN_IMPORT_PATH=/app/backend/data/scripts/run_import.py
+    export LOG_FILE=/host/path/to/logs/owui-sync.log
+    mkdir -p "$(dirname "$LOG_FILE")"
     for d in "$HOST_DROP"/*/; do
       [ -d "$d/.git" ] && git -C "$d" pull --ff-only
     done
-    docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" "$CONTAINER_DROP" >> /var/log/owui-sync.log 2>&1
+    docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" >> "$LOG_FILE" 2>&1
     ```
 
 6. Click **OK**. You can immediately test it with **Action → Run**.

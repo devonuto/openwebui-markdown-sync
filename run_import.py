@@ -11,6 +11,7 @@ The drop_folder argument defaults to /app/backend/data/drop.
 """
 
 import asyncio
+import inspect
 import logging
 import sys
 
@@ -27,6 +28,13 @@ log = logging.getLogger('run_import')
 DROP_FOLDER = sys.argv[1] if len(sys.argv) > 1 else '/app/backend/data/drop'
 
 
+async def _maybe_await(value):
+    """Await value when it is awaitable; otherwise return as-is."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 async def main() -> None:
     # ── 1. Find the first admin user ─────────────────────────────────────────
     # Import only the users model to avoid triggering the full app startup.
@@ -36,7 +44,7 @@ async def main() -> None:
         sys.exit(f'ERROR: cannot import open_webui.models.users: {exc}')
 
     try:
-        all_users = Users.get_users() or []
+        all_users = await _maybe_await(Users.get_users()) or []
     except Exception as exc:
         sys.exit(f'ERROR: Users.get_users() failed: {exc}')
 
@@ -89,7 +97,7 @@ async def main() -> None:
         tool_record = None
         for candidate_id in ('local_directory_import',):
             try:
-                tool_record = DBTools.get_tool_by_id(candidate_id)
+                tool_record = await _maybe_await(DBTools.get_tool_by_id(candidate_id))
             except Exception:
                 pass
             if tool_record is not None:
@@ -97,7 +105,7 @@ async def main() -> None:
 
         if tool_record is None:
             # Fallback: search all tools for one whose id or name matches.
-            all_tools = DBTools.get_tools() or []
+            all_tools = await _maybe_await(DBTools.get_tools()) or []
             tool_record = next(
                 (
                     t for t in all_tools
@@ -108,9 +116,10 @@ async def main() -> None:
             )
 
         if tool_record is None:
+            available_tools = await _maybe_await(DBTools.get_tools()) or []
             log.error(
                 'run_import available tool ids=%s',
-                [getattr(t, 'id', '?') for t in (DBTools.get_tools() or [])],
+                [getattr(t, 'id', '?') for t in available_tools],
             )
             sys.exit('ERROR: tool local_directory_import not found in the DB')
 
