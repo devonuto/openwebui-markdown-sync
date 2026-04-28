@@ -49,7 +49,7 @@ If import succeeds but you still do not see the tool:
 
 | Valve | Type | Default | Description |
 | -- | -- | -- | -- |
-| `allowed_base_dirs` | `list[str]` | `["/app/backend/data/drop"]` | Absolute paths that are permitted as drop-folder roots. The `drop_folder` argument must resolve to a path inside one of these directories. |
+| `drop_folder` | `str` | `"/app/backend/data/drop"` | Absolute path to the drop folder to import from. Each immediate subfolder is mapped to a knowledge base. |
 
 > **Note:** The default matches the standard Open WebUI Docker volume mount path. Adjust if your setup differs.
 
@@ -58,18 +58,14 @@ If import succeeds but you still do not see the tool:
 The tool exposes a single function that the LLM (or a user with admin rights) can invoke:
 
 ```bash
-import_local_directory(drop_folder: str) → str (JSON)
+import_local_directory() → str (JSON)
 ```
 
-### **Parameters**
-
-| Parameter | Description |
-| -- | -- |
-| `drop_folder` | Absolute path to the root folder containing the per-KB subfolders. |
+No parameters — the drop folder path is set by the admin in the `drop_folder` Valve.
 
 ### **Example prompt**
 
-> Import the documents in `/data/drop` into the knowledge bases.
+> Import the documents into the knowledge bases.
 
 ### **Example response (truncated)**
 
@@ -102,7 +98,7 @@ import_local_directory(drop_folder: str) → str (JSON)
 ## Access control
 
 - **Admin only.** The tool rejects calls from any user whose role is not `admin`.
-- **Allow-list path security.** The `drop_folder` is resolved and checked against `allowed_base_dirs` before any file I/O is performed, preventing path traversal.
+- The drop folder path is configured by the admin in the Valve and is never supplied by the user or model, preventing path traversal.
 
 ## Limitations
 
@@ -128,7 +124,7 @@ chmod +x /usr/local/bin/owui-sync.sh
 | Variable | Description |
 | -- | -- |
 | `HOST_DROP` | Path to the drop folder on the **host** (NAS/server). Used by the git pull loop. |
-| `CONTAINER_DROP` | Path to the same drop folder as seen **inside the container**. Sent in the API call and must match `allowed_base_dirs` in the Valve. |
+| `CONTAINER_DROP` | Path to the same drop folder as seen **inside the container**. Must match the `drop_folder` Valve value configured in Open WebUI. |
 | `OWUI_URL` | Base URL of your Open WebUI instance. |
 | `OWUI_API_KEY` | API key for an admin account (`Settings → Account → API Keys`). |
 | `OWUI_MODEL` | Any model that has the Local Directory Import tool enabled. |

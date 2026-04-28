@@ -55,7 +55,6 @@ _plugin_module, _ = _make_import_module()
 
 
 # Re-export symbols for brevity
-_resolve_allowed_base = _plugin_module._resolve_allowed_base
 _discover_subfolders = _plugin_module._discover_subfolders
 _discover_files = _plugin_module._discover_files
 _find_or_create_kb = _plugin_module._find_or_create_kb
@@ -114,44 +113,8 @@ class TestDiscoverFiles:
 
 
 # ---------------------------------------------------------------------------
-# T013 — _resolve_allowed_base & _find_or_create_kb
+# T013 — _find_or_create_kb
 # ---------------------------------------------------------------------------
-
-
-class TestResolveAllowedBase:
-    def test_path_inside_allowed_dir(self, tmp_path):
-        """(a) Path inside allowed dir returns base."""
-        base = tmp_path / 'allowed'
-        base.mkdir()
-        target = base / 'subdir'
-        target.mkdir()
-        result = _resolve_allowed_base(str(target), [str(base)])
-        assert result == base.resolve()
-
-    def test_path_outside_all_allowed_dirs(self, tmp_path):
-        """(b) Path outside all allowed dirs raises ValueError."""
-        allowed = tmp_path / 'allowed'
-        allowed.mkdir()
-        other = tmp_path / 'other'
-        other.mkdir()
-        with pytest.raises(ValueError, match='not within any permitted base directory'):
-            _resolve_allowed_base(str(other), [str(allowed)])
-
-    def test_empty_allow_list_raises(self, tmp_path):
-        """(c) Empty allow-list raises ValueError."""
-        with pytest.raises(ValueError):
-            _resolve_allowed_base(str(tmp_path), [])
-
-    def test_symlink_traversal_blocked(self, tmp_path):
-        """(d) Symlink traversal attempt (path resolves outside base) raises ValueError."""
-        base = tmp_path / 'base'
-        base.mkdir()
-        outside = tmp_path / 'outside'
-        outside.mkdir()
-        link = base / 'link'
-        link.symlink_to(outside)
-        with pytest.raises(ValueError):
-            _resolve_allowed_base(str(link), [str(base)])
 
 
 class TestFindOrCreateKb:
@@ -249,14 +212,13 @@ async def test_import_local_directory_happy_path(tmp_path):
         _plugin_module.get_async_db.return_value = async_ctx
 
         tools = Tools()
-        tools.valves.allowed_base_dirs = [str(tmp_path)]
+        tools.valves.drop_folder = str(tmp_path)
 
         result_str = await tools.import_local_directory(
-            str(tmp_path), admin_user, mock_request
+            admin_user, mock_request
         )
 
     data = json.loads(result_str)
-
     assert 'error' not in data or data['error'] is None
     assert data['total_discovered'] == 3  # 2 + 1
     assert len(data['knowledge_bases']) == 2
@@ -284,12 +246,12 @@ class TestAccessControl:
     async def test_non_admin_returns_error_summary(self):
         """(a) Non-admin role returns error summary with all counts 0."""
         tools = Tools()
-        tools.valves.allowed_base_dirs = ['/tmp']
+        tools.valves.drop_folder = '/tmp'
         user = {'id': 'u1', 'role': 'user', 'email': 'u@x.com', 'name': 'U'}
 
         with patch('shutil.copy') as mock_copy:
             result_str = await tools.import_local_directory(
-                '/tmp/anything', user, MagicMock()
+                user, MagicMock()
             )
             mock_copy.assert_not_called()
 
@@ -299,20 +261,16 @@ class TestAccessControl:
         assert data['total_imported'] == 0
 
     @pytest.mark.asyncio
-    async def test_path_outside_allowlist_returns_error(self, tmp_path):
-        """(b) Path outside allow-list returns error summary with all counts 0."""
+    async def test_blank_drop_folder_returns_error(self):
+        """(b) Blank drop_folder valve returns error summary with all counts 0."""
         tools = Tools()
-        allowed = tmp_path / 'allowed'
-        allowed.mkdir()
-        other = tmp_path / 'other'
-        other.mkdir()
-        tools.valves.allowed_base_dirs = [str(allowed)]
+        tools.valves.drop_folder = ''
 
         admin_user = {'id': 'a1', 'role': 'admin', 'email': 'a@x.com', 'name': 'A'}
 
         with patch('shutil.copy') as mock_copy:
             result_str = await tools.import_local_directory(
-                str(other), admin_user, MagicMock()
+                admin_user, MagicMock()
             )
             mock_copy.assert_not_called()
 
@@ -322,15 +280,15 @@ class TestAccessControl:
 
     @pytest.mark.asyncio
     async def test_nonexistent_drop_folder_returns_error(self, tmp_path):
-        """(c) Non-existent drop folder returns error before file discovery."""
+        """(c) Non-existent drop folder (via valve) returns error before file discovery."""
         tools = Tools()
-        tools.valves.allowed_base_dirs = [str(tmp_path)]
-        admin_user = {'id': 'a1', 'role': 'admin', 'email': 'a@x.com', 'name': 'A'}
         nonexistent = str(tmp_path / 'does_not_exist')
+        tools.valves.drop_folder = nonexistent
+        admin_user = {'id': 'a1', 'role': 'admin', 'email': 'a@x.com', 'name': 'A'}
 
         with patch.object(_plugin_module, '_discover_subfolders') as mock_disc:
             result_str = await tools.import_local_directory(
-                nonexistent, admin_user, MagicMock()
+                admin_user, MagicMock()
             )
             mock_disc.assert_not_called()
 
@@ -378,8 +336,8 @@ class TestVectorization:
             _plugin_module.get_async_db.return_value = async_ctx
 
             tools = Tools()
-            tools.valves.allowed_base_dirs = [str(tmp_path)]
-            result_str = await tools.import_local_directory(str(tmp_path), admin_user, MagicMock())
+            tools.valves.drop_folder = str(tmp_path)
+            result_str = await tools.import_local_directory(admin_user, MagicMock())
 
         data = json.loads(result_str)
         assert data['total_processed'] == 1
@@ -420,8 +378,8 @@ class TestVectorization:
             _plugin_module.get_async_db.return_value = async_ctx
 
             tools = Tools()
-            tools.valves.allowed_base_dirs = [str(tmp_path)]
-            result_str = await tools.import_local_directory(str(tmp_path), admin_user, MagicMock())
+            tools.valves.drop_folder = str(tmp_path)
+            result_str = await tools.import_local_directory(admin_user, MagicMock())
 
         data = json.loads(result_str)
         kb = data['knowledge_bases'][0]
@@ -468,8 +426,8 @@ class TestVectorization:
             _plugin_module.get_async_db.return_value = async_ctx
 
             tools = Tools()
-            tools.valves.allowed_base_dirs = [str(tmp_path)]
-            result_str = await tools.import_local_directory(str(tmp_path), admin_user, MagicMock())
+            tools.valves.drop_folder = str(tmp_path)
+            result_str = await tools.import_local_directory(admin_user, MagicMock())
 
         data = json.loads(result_str)
         assert data['total_processed'] == 1
