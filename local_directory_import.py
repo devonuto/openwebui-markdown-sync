@@ -827,24 +827,37 @@ class Tools:
                         relative_path,
                     )
 
-                    # Hash check — skip files that haven't changed
+                    # Hash check — reuse existing file record if unchanged,
+                    # but still ensure it is linked to this KB.
                     try:
                         file_hash = _hash_file(file_path)
                         existing = await _find_file_by_hash(file_hash, db)
                         if existing is not None:
-                            kb_summary.skipped += 1
                             log.info(
-                                'local_import file=%s kb=%s status=skipped hash=%s',
+                                'local_import file=%s kb=%s status=hash_match reusing file_id=%s',
                                 relative_path,
                                 kb_name,
-                                file_hash,
+                                existing.id,
                             )
+                            # Always re-link to cover cases where a previous run
+                            # registered the file but failed before linking/vectorizing.
+                            try:
+                                await _link_file_to_kb(knowledge_id, existing.id, user_id, db)
+                                kb_summary.linked += 1
+                            except Exception as link_exc:
+                                log.info(
+                                    'local_import file=%s kb=%s relink note=%s',
+                                    relative_path,
+                                    kb_name,
+                                    str(link_exc),
+                                )
+                            kb_summary.skipped += 1
                             kb_summary.files.append(
                                 ImportFileResult(
                                     relative_path=relative_path,
                                     filename=filename,
                                     file_id=existing.id,
-                                    status='skipped',
+                                    status='skipped_relinked',
                                 )
                             )
                             continue
