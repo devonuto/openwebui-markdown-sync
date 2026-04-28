@@ -124,25 +124,37 @@ No parameters — behavior is controlled by Valves.
 
 A common pattern is to keep each subfolder as a git repository, pull the latest commits on a schedule, then trigger the import so Open WebUI's knowledge bases stay in sync automatically.
 
-### The sync script
+### Runner script location
 
-[`owui-sync.sh`](owui-sync.sh) is included in this repo. Copy it to the server and make it executable:
+Use `run_import.py` directly from your scheduler via `docker exec`. Place `run_import.py` in a host path that is already mounted into Open WebUI.
 
-```bash
-cp owui-sync.sh /usr/local/bin/owui-sync.sh
-chmod +x /usr/local/bin/owui-sync.sh
+With this volume mapping:
+
+```yaml
+volumes:
+  - /volume2/docker/open-webui:/app/backend/data
 ```
 
-## **Required environment variables**
+put the file here on host:
+
+```bash
+/volume2/docker/open-webui/scripts/run_import.py
+```
+
+Then execute it in the container as:
+
+```bash
+docker exec open-webui python3 /app/backend/data/scripts/run_import.py /app/backend/data/drop
+```
+
+## Variables for scheduled commands
 
 | Variable | Description |
 | -- | -- |
 | `HOST_DROP` | Path to the drop folder on the **host** (NAS/server). Used by the git pull loop. |
 | `CONTAINER_DROP` | Path to the same drop folder as seen **inside the container**. Must match the `drop_folder` Valve value configured in Open WebUI. |
-| `OWUI_URL` | Base URL of your Open WebUI instance. |
-| `OWUI_API_KEY` | API key for an admin account (`Settings → Account → API Keys`). |
-| `OWUI_MODEL` | Any model that has the Local Directory Import tool enabled. |
-| `OWUI_TOOL_ID` | The tool's ID as shown in **Workspace → Tools**. |
+| `OWUI_CONTAINER` | Docker container name or ID for Open WebUI (default: `open-webui`). |
+| `RUN_IMPORT_PATH` | Full path to `run_import.py` **inside the container** (for the mapping above: `/app/backend/data/scripts/run_import.py`). |
 
 ### Cron (Linux)
 
@@ -155,13 +167,13 @@ crontab -e
 Run every night at 02:00:
 
 ```cron
-0 2 * * * HOST_DROP=/host/path/to/drop CONTAINER_DROP=/app/backend/data/drop OWUI_URL=http://your-owui-host:3000 OWUI_API_KEY=sk-... OWUI_MODEL=gpt-4o OWUI_TOOL_ID=local_directory_import /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
+0 2 * * * HOST_DROP=/host/path/to/drop CONTAINER_DROP=/app/backend/data/drop OWUI_CONTAINER=open-webui RUN_IMPORT_PATH=/app/backend/data/scripts/run_import.py bash -lc 'for d in "$HOST_DROP"/*/; do [ -d "$d/.git" ] && git -C "$d" pull --ff-only; done; docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" "$CONTAINER_DROP"' >> /var/log/owui-sync.log 2>&1
 ```
 
 Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
 
 ```cron
-0 2 * * * . /etc/owui-sync.env && /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
+0 2 * * * . /etc/owui-sync.env && bash -lc 'for d in "$HOST_DROP"/*/; do [ -d "$d/.git" ] && git -C "$d" pull --ff-only; done; docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" "$CONTAINER_DROP"' >> /var/log/owui-sync.log 2>&1
 ```
 
 ### Synology NAS Task Scheduler
@@ -177,16 +189,17 @@ Or store the variables in a file (e.g. `/etc/owui-sync.env`) and source it:
     ```bash
     export HOST_DROP=/host/path/to/drop
     export CONTAINER_DROP=/app/backend/data/drop
-    export OWUI_URL=http://your-owui-host:3000
-    export OWUI_API_KEY=sk-...
-    export OWUI_MODEL=gpt-4o
-    export OWUI_TOOL_ID=local_directory_import
-    bash /usr/local/bin/owui-sync.sh >> /var/log/owui-sync.log 2>&1
+    export OWUI_CONTAINER=open-webui
+    export RUN_IMPORT_PATH=/app/backend/data/scripts/run_import.py
+    for d in "$HOST_DROP"/*/; do
+      [ -d "$d/.git" ] && git -C "$d" pull --ff-only
+    done
+    docker exec "$OWUI_CONTAINER" python3 "$RUN_IMPORT_PATH" "$CONTAINER_DROP" >> /var/log/owui-sync.log 2>&1
     ```
 
 6. Click **OK**. You can immediately test it with **Action → Run**.
 
-> **Synology note:** If Open WebUI runs in a Docker container on the same NAS, use the container's bridge IP (e.g. `http://172.17.0.1:3000`) or the NAS LAN IP rather than `localhost`, since the script runs outside the container network.
+> **Synology note:** Ensure the user running Task Scheduler can execute `docker exec` and access the mounted drop folder.
 
 ---
 
