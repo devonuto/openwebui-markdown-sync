@@ -185,6 +185,7 @@ class KBImportSummary:
     failed: int
     skipped: int = 0
     files: list = field(default_factory=list)
+    error: str | None = None
 
 
 @dataclass
@@ -298,28 +299,123 @@ async def _find_or_create_kb(kb_name: str, user_id: str, db) -> tuple:
     _ensure_openwebui_imports()
 
     existing = None
+    lookup_errors = []
     if Knowledge is not None:
-        result = await db.execute(
-            select(Knowledge).where(Knowledge.name == kb_name).limit(1)
-        )
-        existing = result.scalars().first()
-    elif hasattr(Knowledges, 'get_knowledge_bases'):
-        # Compatibility fallback for builds where the ORM class symbol is not exposed.
-        kbs = await Knowledges.get_knowledge_bases(skip=0, limit=2000, db=db)
-        existing = next((kb for kb in kbs if getattr(kb, 'name', None) == kb_name), None)
+        try:
+            result = await db.execute(
+                select(Knowledge).where(Knowledge.name == kb_name).limit(1)
+            )
+            existing = result.scalars().first()
+        except Exception as exc:
+            lookup_errors.append(f'orm lookup failed: {exc}')
+
+    if existing is None and hasattr(Knowledges, 'get_knowledge_bases'):
+        # Compatibility fallback for builds where the ORM class symbol is not exposed
+        # or where the direct ORM query shape changed.
+        try:
+            kbs = await _call_knowledge_api(
+                Knowledges.get_knowledge_bases,
+                db=db,
+                skip=0,
+                limit=2000,
+            )
+            existing = next(
+                (kb for kb in kbs if getattr(kb, 'name', None) == kb_name),
+                None,
+            )
+        except Exception as exc:
+            lookup_errors.append(f'knowledge list failed: {exc}')
 
     if existing:
         return (existing.id, False)
 
-    new_kb = await Knowledges.insert_new_knowledge(
-        user_id,
+    knowledge_form = (
         KnowledgeForm(
             name=kb_name,
             description='Auto-created by local directory import',
-        ),
-        db=db,
+        )
+        if KnowledgeForm is not None
+        else SimpleNamespace(
+            name=kb_name,
+            description='Auto-created by local directory import',
+        )
     )
+
+    try:
+        new_kb = await _call_knowledge_api(
+            Knowledges.insert_new_knowledge,
+            user_id=user_id,
+            id=user_id,
+            form=knowledge_form,
+            form_data=knowledge_form,
+            knowledge_form=knowledge_form,
+            data=knowledge_form,
+            db=db,
+        )
+    except Exception as exc:
+        lookup_errors.append(f'knowledge create failed: {exc}')
+        raise RuntimeError('; '.join(lookup_errors)) from exc
+
     return (new_kb.id, True)
+
+
+async def _call_knowledge_api(func, **candidate_values):
+    """Call an Open WebUI knowledge helper across signature variations."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        args = []
+        kwargs = {}
+        missing = []
+        for name, param in signature.parameters.items():
+            if name in ('self', 'cls'):
+                continue
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                continue
+            if name in candidate_values:
+                if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                    args.append(candidate_values[name])
+                else:
+                    kwargs[name] = candidate_values[name]
+                continue
+            if param.default is inspect._empty:
+                missing.append(name)
+
+        if not missing:
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+    fallback_calls = [
+        ((candidate_values.get('user_id'), candidate_values.get('form')), {'db': candidate_values.get('db')}),
+        ((candidate_values.get('form'),), {'user_id': candidate_values.get('user_id'), 'db': candidate_values.get('db')}),
+        ((candidate_values.get('user_id'), candidate_values.get('form')), {}),
+        ((), {'skip': candidate_values.get('skip'), 'limit': candidate_values.get('limit'), 'db': candidate_values.get('db')}),
+        ((), {'skip': candidate_values.get('skip'), 'limit': candidate_values.get('limit')}),
+    ]
+
+    last_error = None
+    for args, kwargs in fallback_calls:
+        call_args = tuple(arg for arg in args if arg is not None)
+        call_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        try:
+            result = func(*call_args, **call_kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        except TypeError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError('Unable to call knowledge API with supported arguments')
 
 
 async def _link_file_to_kb(knowledge_id: str, file_id: str, user_id: str, db) -> None:
@@ -521,8 +617,9 @@ class Tools:
                             imported=0,
                             linked=0,
                             processed=0,
-                            failed=0,
+                            failed=1,
                             files=[],
+                            error=str(exc),
                         )
                     )
                     continue
@@ -692,6 +789,12 @@ class Tools:
             total_failed=sum(kb.failed for kb in kb_summaries),
             total_skipped=sum(kb.skipped for kb in kb_summaries),
             knowledge_bases=kb_summaries,
+            error=(
+                'One or more knowledge bases failed to import; '
+                'see knowledge_bases[*].error'
+                if any(kb.error for kb in kb_summaries)
+                else None
+            ),
         )
 
         log.info(

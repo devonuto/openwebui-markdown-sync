@@ -150,6 +150,25 @@ class TestFindOrCreateKb:
 
         assert result == ('new-id', True)
 
+    @pytest.mark.asyncio
+    async def test_orm_lookup_failure_falls_back_to_knowledge_list(self):
+        """ORM lookup failures fall back to Knowledges.get_knowledge_bases."""
+        fake_kb = MagicMock()
+        fake_kb.id = 'fallback-id'
+        fake_kb.name = 'my-kb'
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(side_effect=RuntimeError('orm broke'))
+
+        with patch.object(
+            _plugin_module.Knowledges,
+            'get_knowledge_bases',
+            new=AsyncMock(return_value=[fake_kb]),
+        ):
+            result = await _find_or_create_kb('my-kb', 'user-1', mock_db)
+
+        assert result == ('fallback-id', False)
+
 
 # ---------------------------------------------------------------------------
 # T014 — import_local_directory happy path
@@ -429,6 +448,38 @@ async def test_import_local_directory_supports_generator_db_dependency(tmp_path)
     assert data['error'] is None
     assert data['total_processed'] == 1
     mock_find_kb.assert_awaited_once_with('kb1', 'a1', fake_db)
+
+
+@pytest.mark.asyncio
+async def test_import_local_directory_surfaces_kb_creation_errors(tmp_path):
+    """KB creation errors are reported in the JSON summary instead of hidden."""
+    sub = tmp_path / 'kb1'
+    sub.mkdir()
+    (sub / 'file.txt').write_text('content')
+
+    admin_user = {'id': 'a1', 'role': 'admin', 'email': 'a@x.com', 'name': 'A'}
+
+    with (
+        patch.object(
+            _plugin_module,
+            '_find_or_create_kb',
+            new=AsyncMock(side_effect=RuntimeError('knowledge create failed: boom')),
+        ),
+        patch.object(_plugin_module, 'get_async_db'),
+    ):
+        async_ctx = MagicMock()
+        async_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        async_ctx.__aexit__ = AsyncMock(return_value=False)
+        _plugin_module.get_async_db.return_value = async_ctx
+
+        tools = Tools()
+        tools.valves.drop_folder = str(tmp_path)
+        result_str = await tools.import_local_directory(admin_user, MagicMock())
+
+    data = json.loads(result_str)
+    assert data['error'] == 'One or more knowledge bases failed to import; see knowledge_bases[*].error'
+    assert data['total_failed'] == 1
+    assert data['knowledge_bases'][0]['error'] == 'knowledge create failed: boom'
 
     @pytest.mark.asyncio
     async def test_mixed_vectorization_results_accurate_counts(self, tmp_path):
