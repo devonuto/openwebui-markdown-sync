@@ -336,11 +336,23 @@ def _discover_files(subfolder: pathlib.Path) -> list:
         )
     if unsupported_excluded:
         extensions = sorted({p.suffix.lower() for p in unsupported_excluded})
-        log.info(
-            'local_import discover subfolder=%s unsupported_extensions=%s '
-            'example_files=%s',
+        by_ext = {}
+        for p in unsupported_excluded:
+            ext = p.suffix.lower()
+            by_ext.setdefault(ext, []).append(p)
+        
+        ext_summary = ', '.join(
+            f'{ext}({len(by_ext[ext])} files)' 
+            for ext in sorted(by_ext.keys())
+        )
+        log.warning(
+            'local_import discover subfolder=%s UNSUPPORTED_FILES: %s (rerun with more extensions if needed)',
             subfolder.name,
-            extensions,
+            ext_summary,
+        )
+        log.info(
+            'local_import discover subfolder=%s unsupported_example_files=%s',
+            subfolder.name,
             [str(p.relative_to(subfolder)) for p in unsupported_excluded[:10]],
         )
     return result
