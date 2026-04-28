@@ -254,20 +254,46 @@ async def _find_file_by_hash(file_hash: str, db) -> 'File | None':
 
 
 def _discover_subfolders(drop_folder: pathlib.Path) -> list:
-    """Return a sorted list of immediate subdirectories inside *drop_folder*."""
-    return sorted([p for p in drop_folder.iterdir() if p.is_dir()])
+    """Return a sorted list of immediate subdirectories inside *drop_folder*.
+
+    Hidden directories (names beginning with '.', e.g. .git) are excluded.
+    """
+    return sorted(
+        [p for p in drop_folder.iterdir() if p.is_dir() and not p.name.startswith('.')]
+    )
 
 
 def _is_supported_import_file(path: pathlib.Path) -> bool:
     """Return True when *path* is an allowed text/structured doc file."""
     suffix = path.suffix.lower()
-    return suffix in {'.md', '.markdown', '.mdown', '.mkd', '.txt', '.json', '.yml', '.yaml'}
+    return suffix in {
+        '.md',
+        '.markdown',
+        '.mdown',
+        '.mkd',
+        '.txt',
+        '.json',
+        '.yml',
+        '.yaml',
+        '.pdf',
+    }
 
 
 def _discover_files(subfolder: pathlib.Path) -> list:
-    """Return supported doc files recursively inside *subfolder*."""
+    """Return supported doc files recursively inside *subfolder*.
+
+    Any file whose path contains a hidden directory component (a path part
+    beginning with '.', e.g. .git) is excluded.
+    """
+    base_parts = len(subfolder.parts)
     return sorted(
-        [p for p in subfolder.rglob('*') if p.is_file() and _is_supported_import_file(p)]
+        [
+            p
+            for p in subfolder.rglob('*')
+            if p.is_file()
+            and _is_supported_import_file(p)
+            and not any(part.startswith('.') for part in p.parts[base_parts:])
+        ]
     )
 
 

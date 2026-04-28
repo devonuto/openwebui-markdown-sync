@@ -108,7 +108,7 @@ No parameters — the drop folder path is set by the admin in the `drop_folder` 
 ## Limitations
 
 - **Local filesystem only.** Not compatible with S3, GCS, or Azure Blob storage backends.
-- Only markdown/text/config files (`.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`, `.json`, `.yml`, `.yaml`) are imported. Images and other file types are skipped during discovery.
+- Only markdown/text/config/PDF files (`.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`, `.json`, `.yml`, `.yaml`, `.pdf`) are imported. Images and other file types are skipped during discovery.
 - The drop folder must be accessible to the Open WebUI server process.
 - Deduplication is hash-based: a file that moves to a different path but whose content is unchanged will be skipped. A renamed file with the same content is treated as the same file.
 

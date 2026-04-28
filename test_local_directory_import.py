@@ -89,6 +89,14 @@ class TestDiscoverSubfolders:
         """(c) Empty drop folder returns empty list."""
         assert _discover_subfolders(tmp_path) == []
 
+    def test_hidden_subdirs_excluded(self, tmp_path):
+        """(d) Hidden subdirectories (e.g. .git) are excluded from subfolders."""
+        (tmp_path / 'visible').mkdir()
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.hidden').mkdir()
+        result = _discover_subfolders(tmp_path)
+        assert [p.name for p in result] == ['visible']
+
 
 class TestDiscoverFiles:
     def test_flat_subfolder(self, tmp_path):
@@ -96,9 +104,10 @@ class TestDiscoverFiles:
         (tmp_path / 'a.txt').write_text('a')
         (tmp_path / 'b.md').write_text('b')
         (tmp_path / 'c.json').write_text('{"k": 1}')
+        (tmp_path / 'e.pdf').write_bytes(b'%PDF-1.4')
         (tmp_path / 'd.png').write_bytes(b'png')
         result = _discover_files(tmp_path)
-        assert sorted(p.name for p in result) == ['a.txt', 'b.md', 'c.json']
+        assert sorted(p.name for p in result) == ['a.txt', 'b.md', 'c.json', 'e.pdf']
 
     def test_nested_subdirectories(self, tmp_path):
         """(e) Nested subdirectories returns allowed files recursively."""
@@ -106,18 +115,40 @@ class TestDiscoverFiles:
         sub.mkdir()
         (tmp_path / 'root.yaml').write_text('a: 1')
         (sub / 'nested.md').write_text('n')
+        (sub / 'doc.pdf').write_bytes(b'%PDF-1.4')
         (sub / 'ignored.bin').write_bytes(b'bin')
         (sub / 'ignored.jpg').write_bytes(b'jpg')
         result = _discover_files(tmp_path)
         names = sorted(p.name for p in result)
         assert 'root.yaml' in names
         assert 'nested.md' in names
+        assert 'doc.pdf' in names
         assert 'ignored.bin' not in names
         assert 'ignored.jpg' not in names
 
     def test_empty_subfolder(self, tmp_path):
         """(f) Empty subfolder returns empty list."""
         assert _discover_files(tmp_path) == []
+
+    def test_hidden_directory_files_excluded(self, tmp_path):
+        """(g) Files inside hidden directories (e.g. .git) are not discovered."""
+        git_dir = tmp_path / '.git'
+        git_dir.mkdir()
+        (git_dir / 'config').write_text('[core]')
+        (git_dir / 'COMMIT_EDITMSG').write_text('init')
+        (tmp_path / 'readme.md').write_text('# hi')
+        result = _discover_files(tmp_path)
+        names = [p.name for p in result]
+        assert names == ['readme.md']
+
+    def test_nested_hidden_directory_files_excluded(self, tmp_path):
+        """(h) Files nested deeper inside a hidden directory are also excluded."""
+        hidden = tmp_path / '.hidden' / 'sub'
+        hidden.mkdir(parents=True)
+        (hidden / 'notes.txt').write_text('secret')
+        (tmp_path / 'visible.txt').write_text('visible')
+        result = _discover_files(tmp_path)
+        assert [p.name for p in result] == ['visible.txt']
 
 
 # ---------------------------------------------------------------------------
