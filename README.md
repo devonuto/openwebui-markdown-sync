@@ -115,7 +115,7 @@ No parameters — behavior is controlled by Valves.
 ## Limitations
 
 - **Local filesystem only.** Not compatible with S3, GCS, or Azure Blob storage backends.
-- Only markdown, text, structured config, PDF, and image files (`.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`, `.json`, `.yml`, `.yaml`, `.pdf`, `.png`, `.svg`) are imported. Other file types are skipped during discovery.
+- Only markdown, text, structured config, PDF, image, and XML files (`.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`, `.json`, `.yml`, `.yaml`, `.pdf`, `.png`, `.svg`, `.jpg`, `.jpeg`, `.xml`) are imported. Other file types are skipped during discovery.
 - Dot-prefixed directories are excluded during discovery (e.g. `.git`, `.github`) **except** `.attachments`, which is treated as a regular content folder.
 - The drop folder must be accessible to the Open WebUI server process.
 - Deduplication is hash-based: a file that moves to a different path but whose content is unchanged will be skipped. A renamed file with the same content is treated as the same file.
