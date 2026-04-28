@@ -211,6 +211,12 @@ async def main() -> None:
         from open_webui.main import app  # type: ignore
         from starlette.requests import Request  # type: ignore
 
+        # Direct script execution bypasses ASGI startup events in some builds,
+        # so initialize main_loop if retrieval expects it.
+        if not hasattr(app.state, 'main_loop'):
+            app.state.main_loop = asyncio.get_running_loop()
+            log.info('run_import app.state.main_loop initialized')
+
         scope = {
             'type': 'http',
             'method': 'POST',
@@ -282,6 +288,55 @@ async def main() -> None:
     ToolClass = module_ns.get('Tools')
     if ToolClass is None:
         sys.exit('ERROR: no Tools class found after exec of tool content')
+
+    # Reduce noisy retrieval errors when running as a scheduler job:
+    # - skip vectorization for image files
+    # - treat EMPTY_CONTENT vectorization errors as non-fatal
+    original_vectorize = module_ns.get('_vectorize_file')
+    if callable(original_vectorize):
+        skip_exts = {'.png', '.jpg', '.jpeg', '.svg'}
+
+        async def _vectorize_file_safe(
+            request,
+            file_id,
+            knowledge_id,
+            user,
+            db,
+            file_path=None,
+        ):
+            suffix = ''
+            if file_path is not None:
+                suffix = str(getattr(file_path, 'suffix', '')).lower()
+
+            if suffix in skip_exts:
+                log.info(
+                    'run_import vectorize_skip file_id=%s reason=non_text_extension ext=%s',
+                    file_id,
+                    suffix,
+                )
+                return None
+
+            try:
+                result = original_vectorize(
+                    request,
+                    file_id,
+                    knowledge_id,
+                    user,
+                    db,
+                    file_path=file_path,
+                )
+                return await _maybe_await(result)
+            except Exception as exc:
+                if 'content provided is empty' in str(exc).lower():
+                    log.info(
+                        'run_import vectorize_skip file_id=%s reason=empty_content',
+                        file_id,
+                    )
+                    return None
+                raise
+
+        module_ns['_vectorize_file'] = _vectorize_file_safe
+        log.info('run_import vectorize monkeypatch enabled')
 
     tool_instance = ToolClass()
     tool_instance.valves.drop_folder = DROP_FOLDER
