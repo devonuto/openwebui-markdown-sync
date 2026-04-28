@@ -289,6 +289,11 @@ def _is_supported_import_file(path: pathlib.Path) -> bool:
         '.jpg',
         '.jpeg',
         '.xml',
+        '.mmd',          # Mermaid diagram source
+        '.mermaid',      # Mermaid diagram source (alternate extension)
+        '.py',           # Python scripts
+        '.ps1',          # PowerShell scripts
+        '.html',         # HTML documentation
     }
 
 
@@ -557,7 +562,7 @@ async def _link_file_to_kb(knowledge_id: str, file_id: str, user_id: str, db) ->
 
 # File types whose text content must be supplied inline because Open WebUI's
 # retrieval pipeline has no native loader for them.
-_INLINE_CONTENT_EXTENSIONS = {'.json', '.yml', '.yaml'}
+_INLINE_CONTENT_EXTENSIONS = {'.json', '.yml', '.yaml', '.mmd', '.mermaid', '.py', '.ps1', '.html'}
 
 
 async def _vectorize_file(
